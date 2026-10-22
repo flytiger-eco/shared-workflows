@@ -121,7 +121,7 @@ jobs:
 
       - name: Verify ${{ matrix.scenario }}
         id: ppu
-        uses: ./cluster-task
+        uses: $/cluster-task
         with:
           image: ${{ env.IMAGE }}
           namespace: ${{ env.NAMESPACE }}
@@ -183,7 +183,7 @@ jobs:
       - name: Exercise split lifecycle
         id: lifecycle
         continue-on-error: true
-        uses: ./cluster-task
+        uses: $/cluster-task
         with:
           image: ${{ env.IMAGE }}
           namespace: ${{ env.NAMESPACE }}
@@ -232,7 +232,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Verify default limits
-        uses: ./cluster-task
+        uses: $/cluster-task
         with:
           image: ${{ env.IMAGE }}
           namespace: ${{ env.NAMESPACE }}
@@ -280,7 +280,7 @@ jobs:
       - name: Request eight 810E nodes
         id: gang
         continue-on-error: true
-        uses: ./cluster-task
+        uses: $/cluster-task
         with:
           image: ${{ env.IMAGE }}
           namespace: ${{ env.NAMESPACE }}
@@ -349,7 +349,7 @@ jobs:
           path: ${{ runner.temp }}/downloaded-artifact
 
       - name: Verify source and artifact staging
-        uses: ./cluster-task
+        uses: $/cluster-task
         with:
           image: ${{ env.IMAGE }}
           namespace: ${{ env.NAMESPACE }}
