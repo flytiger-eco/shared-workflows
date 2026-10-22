@@ -110,8 +110,9 @@ to failed runs.
 | `memory` | `resources.limits.memory`; docker units `b/k/m/g/t` are converted |
 
 When `cpus` or `memory` is not set, limits are computed per card:
-`ZW-M890P` uses 31 cores and 256Gi, `OAM-810E` uses 11 cores and 112Gi.
+`ZW-M890P` uses 31 cores and 256Gi; `OAM-810E` and `ZW-810E` both use 11 cores and 112Gi.
 Without a `board-type` selector, `OAM-810E` values are used.
+The requested `board-type` value is preserved in the pod's node selector.
 
 ## Environment contract
 

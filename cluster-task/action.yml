@@ -80,7 +80,7 @@ inputs:
       (alias cpu, maps to container resources.limits.cpu); memory: "64Gi" / "64g" (maps to container
       resources.limits.memory; Docker lowercase units b/k/m/g/t use base 1024 and are converted to Ki/Mi/Gi/Ti).
       When cpus/memory are unset, values are calculated from the card count: 31 cores and 256Gi per card for ZW-M890P,
-      11 cores and 112Gi per card for OAM-810E. OAM-810E is assumed when node_selector omits board-type.
+      11 cores and 112Gi per card for OAM-810E or ZW-810E. OAM-810E is assumed when node_selector omits board-type.
       Explicit values override the corresponding defaults. Unlisted keys are ignored (K8s has no container-level
       swap limit; memory_swap is unsupported).
     required: false
@@ -305,7 +305,7 @@ runs:
         echo "✓ Source archived and staged to NAS: $STAGE_TARBALL ($(du -h "$STAGE_TARBALL" | cut -f1))"
         echo "::endgroup::"
 
-    - name: Wait for ${{ contains(format(',{0},', inputs.node_selector), ',board-type=OAM-810E,') && '810E' || contains(format(',{0},', inputs.node_selector), ',board-type=ZW-M890P,') && '890P' || 'PPU' }} pods to be scheduled
+    - name: Wait for ${{ (contains(format(',{0},', inputs.node_selector), ',board-type=OAM-810E,') || contains(format(',{0},', inputs.node_selector), ',board-type=ZW-810E,')) && '810E' || contains(format(',{0},', inputs.node_selector), ',board-type=ZW-M890P,') && '890P' || 'PPU' }} pods to be scheduled
       id: submit
       shell: bash
       env:
