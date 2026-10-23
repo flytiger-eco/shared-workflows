@@ -61,14 +61,9 @@ refs and `HEAD` remain available for version metadata such as `git describe --al
 The original workspace configuration is not changed. Set any custom Git configuration
 on the worker instead. Use `persist-credentials: false` with checkout as shown above.
 
-Additional artifacts are copied by basename. An explicitly selected source or its
-top-level workspace destination must not be a symlink, even if both refer to the
-same object; dangling symlinks are also rejected. Use real files or directories:
-the archive preserves links rather than following them to runner-only data.
-The same real directory or hardlinked file is skipped; other existing destinations
-fail without merging or overwriting. Missing paths still produce a warning and are skipped.
-After archiving succeeds, the NAS path is handed to cleanup before copying so a
-failed transfer's partial archive can be removed.
+Additional artifacts are copied by basename when that name is not already present in
+the workspace. Existing destinations are left unchanged, and missing paths are skipped
+with a warning.
 
 ## Inputs
 

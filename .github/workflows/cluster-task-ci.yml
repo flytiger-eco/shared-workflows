@@ -86,6 +86,13 @@ jobs:
         shell: bash
         run: python3 cluster-task/tests/test-lifecycle.py
 
+      - name: Test ZW-810E compatibility
+        shell: bash
+        run: |
+          python3 cluster-task/tests/test-lifecycle.py \
+            LifecycleTests.test_810e_board_alias_defaults_and_selector \
+            LifecycleTests.test_810e_board_alias_preserves_explicit_limits
+
       - name: Test workspace staging and CI checks
         shell: bash
         run: python3 cluster-task/tests/test-staging.py
