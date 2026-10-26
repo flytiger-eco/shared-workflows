@@ -236,6 +236,7 @@ def build_payload(record, target):
         version, sub_version = tag_list
     elif len(tag_list) == 1:
         version = tag_list[0]
+    sub_version = sub_version.lower().replace("v", "")
     attributes["sub_version"] = [sub_version]
     attributes["version"] = [version]
 
@@ -263,7 +264,7 @@ def build_payload(record, target):
     # 处理 cmdLine 和 specificLine
     attributes["cmd_line"] = [f"pip install {attributes["item"][0]}=={attributes["version"][0]} -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"]
     if attributes["sub_version"][0]:
-        attributes["specific_line"] = [f"pip install {attributes["item"][0]}=={attributes["version"][0]}+{attributes["sub_version"][0]}.ppu{attributes["sdk_version"][0]} -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"]
+        attributes["specific_line"] = [f"pip install {attributes["item"][0]}=={attributes["version"][0]}+v{attributes["sub_version"][0]}.ppu{attributes["sdk_version"][0]} -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"]
     else:
         attributes["specific_line"] = [f"pip install {attributes["item"][0]}=={attributes["version"][0]}+ppu{attributes["sdk_version"][0]} -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"]
 
