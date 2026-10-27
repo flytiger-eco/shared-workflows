@@ -159,7 +159,7 @@ def sort_key(item):
         # 3. Python 版本（cp310 -> 310，数字比较）
         extract_number(item.get("python"), "cp"),
         # 4. Cuda 版本（cu128 -> 128）
-        extract_number(item.get("cu"), "cu"),
+        extract_number(item.get("cuda"), "cu"),
         # 5. 操作系统字符串
         item.get("os", ""),
         # 6. 版本类型（ce/oe 等）
