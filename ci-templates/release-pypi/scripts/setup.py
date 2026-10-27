@@ -435,10 +435,7 @@ def get_wheel_url():
         else:
             with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
                 strategy_file_path = os.path.join(temp_dir, "strategy.py")
-                if "aiext" in STRATEGY_URL:
-                    download_file_with_curl(STRATEGY_URL, "strategy.py", temp_file_path=temp_dir)
-                else:
-                    download_file(STRATEGY_URL, "strategy.py", temp_file_path=temp_dir)
+                download_file(STRATEGY_URL, "strategy.py", temp_file_path=temp_dir)
                 strategy_module = load_plugin(strategy_file_path)
                 data = {
                     "base_wheel_url": BASE_WHEEL_URL,
