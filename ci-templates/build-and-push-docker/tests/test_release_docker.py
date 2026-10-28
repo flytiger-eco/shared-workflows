@@ -1,6 +1,7 @@
 """Offline regression tests for the release Docker template: no image builds, logins, or live API requests."""
 
 import base64
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -32,7 +33,8 @@ DEFAULT_INPUTS = {
     "os": "ubuntu24.04", "python": "3.12", "cuda": "13.0.0",
     "sdk_version": "2.2.0", "torch": "2.13.0", "network": "mellanox/EIC",
 }
-IMAGE = "pkg.flytiger-eco.com/docker_release/team/demo:1.0.0"
+REVISION = "v1.2.3"
+IMAGE = f"pkg.flytiger-eco.com/docker_release/team/demo-{REVISION}:1.0.0"
 DIGEST = "sha256:" + "a" * 64
 
 
@@ -59,17 +61,41 @@ def post_module(validator, monkeypatch):
     return module
 
 
+def run_git(source, *args, input=""):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+               GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid",
+               GIT_AUTHOR_DATE="2026-10-28T00:00:00+00:00", GIT_COMMITTER_DATE="2026-10-28T00:00:00+00:00")
+    return subprocess.run(
+        ["git", "-C", str(source), *args], input=input, env=env,
+        check=True, capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+
+
 @pytest.fixture
-def source():
+def git_source():
     with tempfile.TemporaryDirectory(prefix=".release-docker-test-", dir=ROOT) as directory:
         root = Path(directory).resolve()
         (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        run_git(root, "init", "--quiet")
+        tree = run_git(root, "mktree")
+        commit = run_git(root, "commit-tree", tree, "-m", "Test source")
+        run_git(root, "update-ref", "HEAD", commit)
         yield root
+
+
+@pytest.fixture
+def source(git_source):
+    run_git(git_source, "tag", REVISION)
+    return git_source
 
 
 @pytest.fixture
 def release_env(monkeypatch):
     monkeypatch.setenv("INPUTS_JSON", json.dumps(DEFAULT_INPUTS))
+    monkeypatch.setenv("SOURCE_REVISION", REVISION)
+    monkeypatch.setenv("RESOLVED_DOCKER_TAG", DEFAULT_INPUTS["docker_tag"])
     monkeypatch.setenv("IMAGE", IMAGE)
     monkeypatch.setenv("DIGEST", DIGEST)
     monkeypatch.setenv("SIZE", "123456789")
@@ -82,6 +108,7 @@ def test_allowed_network_values_preserved_without_changing_image(validator, sour
     assert validator.release_metadata(inputs) == {key: inputs[key] for key in FIELDS}
     assert validator.validate_inputs(inputs, source) == {
         "image": IMAGE, "build_context": str(source), "dockerfile": str(source / "Dockerfile"),
+        "source_revision": REVISION, "docker_tag": "1.0.0",
     }
 
 
@@ -146,6 +173,106 @@ def test_invalid_tags(validator, tag):
         validator.image_reference("demo", tag)
 
 
+@pytest.mark.parametrize("tag_kind", [None, "lightweight", "annotated"])
+@pytest.mark.parametrize("docker_tag", [None, "", "custom-1.0"])
+def test_resolved_image_flows_to_release_data(
+    validator, post_module, release_env, git_source, monkeypatch, tag_kind, docker_tag,
+):
+    revision = run_git(git_source, "rev-parse", "HEAD")
+    if tag_kind:
+        args = ("-a", "-m", "Test release") if tag_kind == "annotated" else ()
+        run_git(git_source, "tag", *args, REVISION)
+        revision = REVISION
+    inputs = dict(DEFAULT_INPUTS)
+    inputs.pop("docker_tag")
+    if docker_tag is not None:
+        inputs["docker_tag"] = docker_tag
+    clock = SimpleNamespace(now=Mock(return_value=datetime(2026, 10, 28, 23, 59, tzinfo=timezone.utc)))
+    monkeypatch.setattr(validator, "datetime", clock)
+    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
+    monkeypatch.setenv("GITHUB_REF_NAME", "unrelated-branch")
+    outputs = validator.validate_inputs(inputs, git_source)
+    expected_tag = docker_tag or "2026-10-28"
+    expected_image = f"pkg.flytiger-eco.com/docker_release/team/demo-{revision}:{expected_tag}"
+    assert outputs["image"] == expected_image
+    assert outputs["source_revision"] == revision
+    assert outputs["docker_tag"] == expected_tag
+    if docker_tag:
+        clock.now.assert_not_called()
+    else:
+        clock.now.assert_called_once_with(timezone.utc)
+    clock.now.side_effect = AssertionError("Publishing must reuse the resolved date even across midnight")
+    monkeypatch.setenv("INPUTS_JSON", json.dumps(inputs))
+    monkeypatch.setenv("SOURCE_REVISION", outputs["source_revision"])
+    monkeypatch.setenv("RESOLVED_DOCKER_TAG", outputs["docker_tag"])
+    monkeypatch.setenv("IMAGE", outputs["image"])
+    record = post_module.read_record()
+    assert record["docker_name"] == "team/demo"
+    assert record["docker_tag"] == expected_tag
+    assert record["image"] == expected_image
+    assert record["idempotentKey"] == hashlib.md5(expected_image.encode(), usedforsecurity=False).hexdigest()
+    assert post_module.build_payload(record)["attributes"]["image"] == [expected_image]
+
+
+def test_ancestor_tag_does_not_replace_current_commit(validator, source):
+    parent = run_git(source, "rev-parse", "HEAD")
+    tree = run_git(source, "rev-parse", "HEAD^{tree}")
+    commit = run_git(source, "commit-tree", tree, "-p", parent, "-m", "Untagged child")
+    run_git(source, "update-ref", "HEAD", commit)
+    assert validator.validate_inputs(DEFAULT_INPUTS, source)["image"] == (
+        f"pkg.flytiger-eco.com/docker_release/team/demo-{commit}:1.0.0"
+    )
+
+
+def test_detached_head_tag_is_detected(validator, source):
+    run_git(source, "checkout", "--detach", "HEAD")
+    assert validator.validate_inputs(DEFAULT_INPUTS, source)["image"] == IMAGE
+
+
+def test_multiple_exact_tags_use_name_order(validator, source):
+    run_git(source, "tag", "-a", "-m", "Another release", "v2.0.0")
+    run_git(source, "tag", "v1.0.0")
+    assert validator.source_revision(source) == "v1.0.0"
+
+
+@pytest.mark.parametrize("revision", ["V1.0", "release/v1", "v1+build", "v1-", "v1;echo", "v1_é"])
+def test_invalid_git_tag_fails_without_renaming(validator, git_source, revision):
+    run_git(git_source, "tag", revision)
+    with pytest.raises(ValueError, match="Git tag or commit"):
+        validator.validate_inputs(DEFAULT_INPUTS, git_source)
+
+
+@pytest.mark.parametrize("revision", [REVISION, "a" * 40])
+def test_version_suffix_counts_toward_name_length(validator, revision):
+    length = 255 - len("pkg.flytiger-eco.com/docker_release/") - len(revision) - 1
+    assert validator.versioned_image_reference("a" * length, revision, "v1").endswith(f"-{revision}:v1")
+    with pytest.raises(ValueError, match="255"):
+        validator.versioned_image_reference("a" * (length + 1), revision, "v1")
+
+
+@pytest.mark.parametrize("name", ["", "demo-", "team/", "Demo", "docker_release/demo"])
+def test_version_suffix_does_not_mask_invalid_base_name(validator, name):
+    with pytest.raises(ValueError, match="docker_name"):
+        validator.versioned_image_reference(name, REVISION, "v1")
+
+
+@pytest.mark.parametrize("tag", [None, False, 123, " ", "v1\nother", "v1+build", "a" * 129])
+def test_optional_docker_tag_still_rejects_invalid_values(validator, source, tag):
+    with pytest.raises(ValueError, match="docker_tag"):
+        validator.validate_inputs(dict(DEFAULT_INPUTS, docker_tag=tag), source)
+
+
+@pytest.mark.parametrize("error", [
+    subprocess.CalledProcessError(1, "git"), subprocess.TimeoutExpired("git", 30), FileNotFoundError("git"),
+])
+def test_git_lookup_errors_fail_validation(validator, source, monkeypatch, error):
+    monkeypatch.setattr(validator, "subprocess", SimpleNamespace(
+        run=Mock(side_effect=error), SubprocessError=subprocess.SubprocessError,
+    ))
+    with pytest.raises(ValueError, match="Failed to resolve caller Git"):
+        validator.validate_inputs(DEFAULT_INPUTS, source)
+
+
 @pytest.mark.parametrize("key", ["dockerfile", "build_context"])
 @pytest.mark.parametrize("value", ["", "../Dockerfile", "/tmp", "https://example.invalid/context", "a\nb", "a\x00b", "a\\b"])
 def test_unsafe_paths(validator, source, key, value):
@@ -193,17 +320,26 @@ def test_invalid_build_args(validator, source, args):
         validator.validate_inputs(dict(DEFAULT_INPUTS, build_args=args), source)
 
 
-@pytest.mark.parametrize("override", [{}, {"network": "eic"}, {"dockerfile": "missing"}])
+@pytest.mark.parametrize("override", [{}, {"docker_tag": ""}, {"network": "eic"}, {"dockerfile": "missing"}])
 def test_validator_cli_outputs_only_on_success(source, override):
     output_file = source / "outputs"
+    before = datetime.now(timezone.utc).date().isoformat()
     result = subprocess.run(
         [sys.executable, str(SCRIPT)], cwd=source, capture_output=True, text=True, timeout=10,
         env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", SOURCE_DIR=str(source),
                  GITHUB_OUTPUT=str(output_file), INPUTS_JSON=json.dumps(dict(DEFAULT_INPUTS, **override))),
     )
-    assert (result.returncode == 0) == (not override), result.stderr
-    if not override:
-        assert f"image={IMAGE}\n" in output_file.read_text()
+    success = not override or "docker_tag" in override
+    assert (result.returncode == 0) == success, result.stderr
+    if success:
+        outputs = dict(line.split("=", 1) for line in output_file.read_text().splitlines())
+        assert outputs["source_revision"] == REVISION
+        if override:
+            after = datetime.now(timezone.utc).date().isoformat()
+            assert outputs["docker_tag"] in {before, after}
+        else:
+            assert outputs["docker_tag"] == "1.0.0"
+        assert outputs["image"] == f"pkg.flytiger-eco.com/docker_release/team/demo-{REVISION}:{outputs['docker_tag']}"
     else:
         assert not output_file.exists()
 
@@ -213,7 +349,7 @@ def test_release_record_contains_only_whitelisted_fields(post_module, release_en
     expected = {key: DEFAULT_INPUTS[key] for key in (*FIELDS, "docker_name", "docker_tag")}
     record = post_module.read_record()
     assert record == dict(expected, image=IMAGE, digest="a" * 64, size=123456789,
-                          idempotentKey="dd1028951ede1aff233bca9f29d802cb")
+                          idempotentKey="fcd39576212fda54f967faf49c8f4476")
     assert type(record["size"]) is int
 
 
@@ -228,8 +364,9 @@ def test_idempotent_key_depends_on_image_not_build_result(post_module, release_e
 def test_idempotent_key_changes_with_image(post_module, release_env, monkeypatch, field, value):
     original = post_module.read_record()["idempotentKey"]
     inputs = dict(DEFAULT_INPUTS, **{field: value})
-    image = f"pkg.flytiger-eco.com/docker_release/{inputs['docker_name']}:{inputs['docker_tag']}"
+    image = f"pkg.flytiger-eco.com/docker_release/{inputs['docker_name']}-{REVISION}:{inputs['docker_tag']}"
     monkeypatch.setenv("INPUTS_JSON", json.dumps(inputs))
+    monkeypatch.setenv("RESOLVED_DOCKER_TAG", inputs["docker_tag"])
     monkeypatch.setenv("IMAGE", image)
     key = post_module.read_record()["idempotentKey"]
     assert key == hashlib.md5(image.encode("utf-8"), usedforsecurity=False).hexdigest()
@@ -239,6 +376,9 @@ def test_idempotent_key_changes_with_image(post_module, release_env, monkeypatch
 @pytest.mark.parametrize("environment,value", [
     ("INPUTS_JSON", "{"), ("INPUTS_JSON", "[]"), ("INPUTS_JSON", "{}"),
     ("IMAGE", ""), ("IMAGE", IMAGE.replace("docker_release", "docker_tmp")),
+    ("IMAGE", IMAGE.replace("-" + REVISION, "")), ("IMAGE", IMAGE.replace(REVISION, "v2.0.0")),
+    ("SOURCE_REVISION", ""), ("SOURCE_REVISION", "release/v1"), ("SOURCE_REVISION", "v2.0.0"),
+    ("RESOLVED_DOCKER_TAG", ""), ("RESOLVED_DOCKER_TAG", "different"),
     ("IMAGE", IMAGE + "-other"), ("DIGEST", ""), ("DIGEST", "sha256:abcd"),
     ("DIGEST", "sha256:" + "a" * 64 + "\n"), ("DIGEST", "sha512:" + "a" * 64),
     ("SIZE", ""), ("SIZE", "0"), ("SIZE", "-1"), ("SIZE", "1.5"), ("SIZE", "123 MB"),
@@ -258,7 +398,7 @@ def expected_payload():
     return {
         "artifactName": "team/demo",
         "businessType": "DOCKER",
-        "idempotentKey": "dd1028951ede1aff233bca9f29d802cb",
+        "idempotentKey": "fcd39576212fda54f967faf49c8f4476",
         "attributes": {
             "name": ["team/demo"],
             "os": ["ubuntu24.04"],
@@ -432,6 +572,11 @@ def test_workflow_contract_and_execution_order():
     assert set(workflow["on"]) == {"workflow_call"}
     assert set(contract["inputs"]) == set(old_inputs) | set(FIELDS)
     for key, old_input in old_inputs.items():
+        if key == "docker_tag":
+            assert contract["inputs"][key]["required"] == "false"
+            assert contract["inputs"][key]["type"] == "string"
+            assert contract["inputs"][key]["default"] == ""
+            continue
         for attribute in ("required", "type", "default"):
             assert contract["inputs"][key].get(attribute) == old_input.get(attribute)
     for key in FIELDS:
@@ -468,6 +613,8 @@ def test_workflow_contract_and_execution_order():
     assert inspect["run"] == "python ci-template/ci-templates/build-and-push-docker/scripts/inspect_image.py"
     assert summary["env"]["SIZE"] == "${{ steps.inspect.outputs.size }}"
     assert post["env"] == {"INPUTS_JSON": "${{ toJSON(inputs) }}", "IMAGE": "${{ steps.validate.outputs.image }}",
+                            "SOURCE_REVISION": "${{ steps.validate.outputs.source_revision }}",
+                            "RESOLVED_DOCKER_TAG": "${{ steps.validate.outputs.docker_tag }}",
                             "DIGEST": "${{ steps.build.outputs.digest }}", "SIZE": "${{ steps.inspect.outputs.size }}",
                             "CLIENT_PRIVATE_KEY_B64": "${{ secrets.data_token }}"}
     assert post["run"] == "python ci-template/ci-templates/build-and-push-docker/scripts/post_data.py"
@@ -508,8 +655,10 @@ def test_demo_matches_reusable_workflow_contract():
     assert manual_inputs["network"]["type"] == "choice"
     assert manual_inputs["network"]["required"] == "true"
     assert manual_inputs["network"]["options"] == ["mellanox", "EIC", "mellanox/EIC"]
-    for key in ("docker_name", "docker_tag", "dockerfile"):
+    for key in ("docker_name", "dockerfile"):
         assert manual_inputs[key]["required"] == "true"
+    assert manual_inputs["docker_tag"]["required"] == "false"
+    assert manual_inputs["docker_tag"]["default"] == ""
     assert publish["secrets"] == {
         "release_username": "${{ secrets.RELEASE_USERNAME }}",
         "release_token": "${{ secrets.RELEASE_TOKEN }}",
@@ -532,6 +681,7 @@ def test_demo_resolved_inputs_pass_validation(validator, source, network):
         inputs[key] = value
     assert validator.validate_inputs(inputs, source) == {
         "image": IMAGE, "build_context": str(source), "dockerfile": str(source / "Dockerfile"),
+        "source_revision": REVISION, "docker_tag": "1.0.0",
     }
     assert validator.release_metadata(inputs) == {
         "os": "ubuntu24", "python": "py312", "cuda": "13.0",

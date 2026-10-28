@@ -17,7 +17,7 @@ This is a reusable workflow called through `jobs.<job_id>.uses`, not a regular A
 3. Configure Actions Secrets: `RELEASE_USERNAME`, `RELEASE_TOKEN`, and `DATA_TOKEN`. The registry account must have push and read permissions for `docker_release`; the data API private key must match the client identity.
 4. Update the fixed `os`, `python`, `cuda`, `sdk_version`, and `torch` values in the demo to match the actual image environment. These values are release metadata only; they do not automatically install dependencies or change the build.
 5. Ensure the selected template revision contains the workflow and all scripts. The example uses `flytiger-eco/shared-workflows@main`; for production, replace both `@main` in `uses` and `template_ref: main` with the same full commit SHA from the template repository. When using a fork, update both the repository path in `uses` and `template_repository`.
-6. Commit the caller workflow to the caller's default branch. On the Actions page, select **Run workflow**, choose a trusted branch, and enter the image name, tag, network type, and other parameters.
+6. Commit the caller workflow to the caller's default branch. On the Actions page, select **Run workflow**, choose a trusted branch, and enter the base image name, network type, and other parameters. The image tag is optional; leave it empty to use the current UTC date.
 7. After a successful run, find the image address, digest, and size in the logs, job summary, or the demo's `result` job.
 
 **The demo actually builds and pushes images and publishes metadata; it is not a dry run.** Run it only on trusted repositories, branches, and Dockerfiles.
@@ -39,10 +39,23 @@ Check out caller source and template tools into separate directories
 The Docker client image address is fixed to:
 
 ```text
-pkg.flytiger-eco.com/docker_release/<docker_name>:<docker_tag>
+pkg.flytiger-eco.com/docker_release/<docker_name>-<git_tag_or_commit>:<docker_tag>
 ```
 
-For example, `docker_name: team/demo` and `docker_tag: '1.0.0'` produce `pkg.flytiger-eco.com/docker_release/team/demo:1.0.0`.
+The suffix comes from the caller source's checked-out `HEAD`, not the template repository: use a Git tag pointing exactly at that commit, or the full commit SHA when no exact tag exists. Both lightweight and annotated tags are supported. If multiple tags point at the commit, the first in lexicographic name order is used; tags on ancestor commits are ignored. The Git tag must be a valid lowercase Docker name component; unsupported characters (such as uppercase letters, `/`, or `+`) fail validation rather than being silently rewritten.
+
+`docker_tag` is independent of the Git tag. If omitted or set to an empty string, it defaults to the UTC date at input validation time in `YYYY-MM-DD` format. The resolved suffix and Docker tag are reused for building, inspection, and metadata publishing, even if the build crosses midnight.
+
+Examples with `docker_name: team/demo` (all use the prefix `pkg.flytiger-eco.com/docker_release/`):
+
+| Checked-out commit | `docker_tag` input | Image name and tag |
+| --- | --- | --- |
+| Tagged `v1.2.3` | `1.0.0` | `team/demo-v1.2.3:1.0.0` |
+| Untagged | `1.0.0` | `team/demo-<full_commit_sha>:1.0.0` |
+| Tagged `v1.2.3` | Omitted, on UTC 2026-10-28 | `team/demo-v1.2.3:2026-10-28` |
+| Untagged | Omitted, on UTC 2026-10-28 | `team/demo-<full_commit_sha>:2026-10-28` |
+
+Repeated builds of the same revision on the same UTC day target the same image address unless a distinct `docker_tag` is supplied.
 
 The Artifactory repository URL is `https://pkg.flytiger-eco.com/artifactory/docker_release/`, but Docker login uses only `pkg.flytiger-eco.com`. Image addresses do not include `https://` or `/artifactory/`; the destination service must configure the corresponding Docker Registry path mapping.
 
@@ -55,8 +68,8 @@ All reusable workflow inputs have type `string`; quote version numbers.
 | `dockerfile` | Yes | None | Dockerfile path relative to the caller repository root, such as `docker/Dockerfile`. |
 | `build_context` | No | `.` | Local build context directory relative to the caller repository root. |
 | `build_args` | No | Empty string | One `KEY=VALUE` per line, passed to Docker ARG; not shell or Buildx command-line options. |
-| `docker_name` | Yes | None | Lowercase image name, optionally namespaced, such as `team/demo`; without a registry, `docker_release/` or `docker_tmp/` prefix, or tag. |
-| `docker_tag` | Yes | None | Single tag of up to 128 characters, such as `1.0.0`; `+`, spaces, `/`, and `:` are not supported. |
+| `docker_name` | Yes | None | Lowercase base image name, optionally namespaced, such as `team/demo`; without a registry, `docker_release/` or `docker_tmp/` prefix, or tag. The Git tag or full commit SHA is appended automatically. |
+| `docker_tag` | No | Current UTC date (`YYYY-MM-DD`) | Omitted or empty uses the date. Otherwise, a single tag of up to 128 characters, such as `1.0.0`; `+`, spaces, `/`, and `:` are not supported. |
 | `os` | Yes | None | Operating system release metadata, such as `ubuntu24.04`; does not select the runner. |
 | `python` | Yes | None | Python version, such as `3.12`. |
 | `cuda` | Yes | None | CUDA version, such as `13.0.0`. |
@@ -68,7 +81,7 @@ All reusable workflow inputs have type `string`; quote version numbers.
 
 All six release fields must be non-empty printable strings without surrounding whitespace. Apart from the `network` enum, no additional version format restrictions apply. These fields do not automatically modify tags, become Docker ARG values, set image labels, select a different runner, or configure the build network.
 
-Both the Dockerfile and build context paths are relative to the caller repository root, not to each other. The Dockerfile must be a non-empty regular file, and the context must be a directory. Absolute paths, `..`, remote URLs, and symlinks pointing outside the repository are not supported. The full image repository name, including the registry and `docker_release/`, must not exceed 255 characters.
+Both the Dockerfile and build context paths are relative to the caller repository root, not to each other. The Dockerfile must be a non-empty regular file, and the context must be a directory. Absolute paths, `..`, remote URLs, and symlinks pointing outside the repository are not supported. The full image repository name, including the registry, `docker_release/`, and the Git tag or commit suffix, must not exceed 255 characters.
 
 Variable names in `build_args` must match `[A-Za-z_][A-Za-z0-9_]*` and must not be duplicated; empty values and blank lines are allowed. Never pass passwords or tokens, because build arguments may appear in image history or provenance. The template does not provide BuildKit secret mount inputs. The Dockerfile must declare and use the corresponding ARG values; `docker_tag` does not automatically become a build argument.
 
@@ -121,7 +134,7 @@ Top-level fields:
 | `torch` | `[torch]` |
 | `nicType` | `[network]`; `mellanox/EIC` remains a single value rather than being split into two elements. |
 
-`read_record()` returns 12 keys: `os`, `python`, `cuda`, `sdk_version`, `torch`, `network`, `docker_name`, `docker_tag`, `image`, `digest`, `size`, and `idempotentKey`. `size` is an integer; all other values are strings. `docker_tag` is included in `image` rather than mapped to a separate attribute. Build arguments and credentials are excluded from the business object.
+`read_record()` returns 12 keys: `os`, `python`, `cuda`, `sdk_version`, `torch`, `network`, `docker_name`, `docker_tag`, `image`, `digest`, `size`, and `idempotentKey`. `size` is an integer; all other values are strings. `docker_name` remains the caller's base name for `artifactName` and `attributes.name`; `image` includes the Git tag or commit suffix. `docker_tag` contains the resolved explicit tag or UTC date and is included in `image` rather than mapped to a separate attribute. Build arguments and credentials are excluded from the business object.
 
 The same image address produces the same `idempotentKey`, even if the digest or size changes; a different image name or tag produces a newly calculated key. This rule defines only the client-side key; actual deduplication or overwrite behavior depends on the server. Use distinct tags for different releases.
 
