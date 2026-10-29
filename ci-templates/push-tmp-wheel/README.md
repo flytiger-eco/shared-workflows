@@ -3,7 +3,7 @@
 Find `wheel_name` in the specified artifact from the current GitHub Actions run, validate it, and upload the wheel unchanged to:
 
 ```text
-https://pkg.flytiger-eco.com/artifactory/pypi_tmp_generic/{package_name}/{wheel_name}
+https://pkg.flytiger-eco.com/artifactory/pypi_tmp/{package_name}/{wheel_name}
 ```
 
 - Workflow entry point: [`.github/workflows/push-tmp-wheel.yml`](../../.github/workflows/push-tmp-wheel.yml)
