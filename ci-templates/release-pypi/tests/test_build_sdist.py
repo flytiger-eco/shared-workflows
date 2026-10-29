@@ -804,9 +804,9 @@ def test_framework_detection_uses_isolated_modules(setup_template, monkeypatch, 
 @pytest.mark.parametrize("value", [None, "2.2.0"])
 def test_sdk_environment_is_optional(setup_template, monkeypatch, value):
     if value is None:
-        monkeypatch.delenv("SAIL_PYPI_SDK_VESION", raising=False)
+        monkeypatch.delenv("SAIL_PYPI_SDK_VERSION", raising=False)
     else:
-        monkeypatch.setenv("SAIL_PYPI_SDK_VESION", value)
+        monkeypatch.setenv("SAIL_PYPI_SDK_VERSION", value)
     assert setup_template.get_sdk_version_by_env() == value
 
 
