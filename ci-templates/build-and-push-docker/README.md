@@ -33,6 +33,7 @@ Check out caller source and template tools into separate directories
   -> Build and push a linux/amd64 image
   -> Inspect the manifest using the pushed digest and calculate size
   -> Output image, digest, and size
+  -> Run pip freeze inside the pushed image and collect installed package names and versions
   -> Assemble DOCKER metadata, encrypt and sign the request, and call the publishing API
 ```
 
@@ -120,6 +121,7 @@ Top-level fields:
 | `businessType` | Fixed to `DOCKER`. |
 | `idempotentKey` | MD5 of the full UTF-8-encoded `image` string, represented as 32 lowercase hexadecimal characters. |
 | `attributes` | Attribute object described below; all values are single-element lists of strings. |
+| `packageList` | Packages installed in the pushed image, as objects containing `packageName` and `packageVersion`. |
 
 | `attributes` Field | Value |
 | --- | --- |
@@ -134,7 +136,11 @@ Top-level fields:
 | `torch` | `[torch]` |
 | `nicType` | `[network]`; `mellanox/EIC` remains a single value rather than being split into two elements. |
 
-`read_record()` returns 12 keys: `os`, `python`, `cuda`, `sdk_version`, `torch`, `network`, `docker_name`, `docker_tag`, `image`, `digest`, `size`, and `idempotentKey`. `size` is an integer; all other values are strings. `docker_name` remains the caller's base name for `artifactName` and `attributes.name`; `image` includes the Git tag or commit suffix. `docker_tag` contains the resolved explicit tag or UTC date and is included in `image` rather than mapped to a separate attribute. Build arguments and credentials are excluded from the business object.
+`read_record()` returns 13 keys: `os`, `python`, `cuda`, `sdk_version`, `torch`, `network`, `docker_name`, `docker_tag`, `image`, `digest`, `size`, `idempotentKey`, and `packageList`. `size` is an integer and `packageList` is a list of objects; all other values are strings. `docker_name` remains the caller's base name for `artifactName` and `attributes.name`; `image` includes the Git tag or commit suffix. `docker_tag` contains the resolved explicit tag or UTC date and is included in `image` rather than mapped to a separate attribute. Build arguments and credentials are excluded from the business object.
+
+Package collection runs `pip freeze --all` inside a `linux/amd64` container addressed by the pushed `repository@digest`, not the mutable tag or the runner's Python environment. `--all` also includes packaging tools such as pip. Lines such as `torch==2.5.8` become `{"packageName": "torch", "packageVersion": "2.5.8"}`; version suffixes such as `+cu124` are preserved. Blank lines, comments, malformed entries, and URL or editable references without a parseable version are skipped individually. Valid entries are deduplicated and sorted by normalized package name; the first version is retained for duplicate names. Parsing never blocks publishing, and no fallback command is run for skipped entries.
+
+Package collection uses the `pip` on the image's configured `PATH`; only that Python environment is inspected, and an unavailable pip produces an empty list. The original image entrypoint is bypassed, so virtual environments must already be configured through the image environment. Containers have networking disabled and receive no host mounts or publishing credentials. The Docker daemon can pull the image using the existing registry login. Each collection command has a 15-minute timeout; failed or timed-out runs attempt container cleanup. Collection failures (including missing pip, Docker errors, timeouts, and output decoding errors) yield `packageList: []` without logging an error or blocking API publishing. Cleanup failures are also ignored. If parsing finds no valid entries, the list is empty; otherwise, successfully parsed entries are retained. Existing release metadata, image, digest, and size validation remains mandatory. `packageList` is independent of the caller-supplied `torch` release metadata.
 
 The same image address produces the same `idempotentKey`, even if the digest or size changes; a different image name or tag produces a newly calculated key. This rule defines only the client-side key; actual deduplication or overwrite behavior depends on the server. Use distinct tags for different releases.
 
