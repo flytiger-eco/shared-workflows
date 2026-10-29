@@ -212,7 +212,7 @@ Related environment variables:
 | --- | --- |
 | `CUDA_SDK_VER` | Explicitly specifies the Runtime, e.g., `cuda-13.0.0`; detected via `nvcc --version` if unset or incorrectly formatted |
 | `SAIL_SDK_MATCH_STRATEGY` | When set to `off`, uses local naming rules to construct the wheel URL directly |
-| `SAIL_PYPI_SDK_VESION` | SDK version input provided by the template; `VESION` is the existing spelling in the variable name, and whether it is used depends on the matching strategy |
+| `SAIL_PYPI_SDK_VERSION` | SDK version input provided by the template; `VESION` is the existing spelling in the variable name, and whether it is used depends on the matching strategy |
 
 ## Repository Structure
 
