@@ -41,6 +41,38 @@ def get_sdk_url(sdk_version, runtime_version, os_version):
     sdk_package_name = get_sdk_package_name(sdk_version, runtime_version, os_version)
     return f"https://pkg.flytiger-eco.com/artifactory/generic-local/CUDA_SDK/v{sdk_version}/{sdk_package_name}"
 
+def get_nccl_url(nccl_sdk_version, runtime_version, os_version):
+    _nccl_sdk_version = nccl_sdk_version.lower().replace("v", "")
+    _runtime_version = runtime_version.lower().replace("cuda", "").replace("cu", "")
+    nccl_versions = {
+        "11.0.3": "2.8.3",
+        "11.1.1": "2.8.3",
+        "11.2.1": "2.8.4",
+        "11.3.1": "2.9.9",
+        "11.4.2": "2.11.4",
+        "11.5.0": "2.11.4",
+        "11.6.2": "2.12.10",
+        "11.7.1": "2.17.1",
+        "11.8.0": "2.17.1",
+        "12.0.1": "2.17.1",
+        "12.1.1": "2.18.3",
+        "12.2.2": "2.19.3",
+        "12.3.0": "2.19.3",
+        "12.4.1": "2.21.5",
+        "12.5.1": "2.22.3",
+        "12.6.0": "2.22.3",
+        "12.8.0": "2.27.3",
+        "12.9.0": "2.27.3",
+        "13.0.0": "2.27.3-v13",
+        "13.1.0": "2.27.3-v13",
+        "13.2.0": "2.27.3-v13",
+        "13.3.0": "2.27.3-v13",
+    }
+    nccl_version = nccl_versions.get(_runtime_version)
+    if nccl_version is None:
+        fail(f"Runtime version {runtime_version} 没有对应的 NCCL 版本")
+    return f"https://pkg.flytiger-eco.com/artifactory/generic-local/NCCL/v{_nccl_sdk_version}/nccl-{nccl_version}_{os_version}_sdk-v{_nccl_sdk_version}.tar.gz"
+
 
 def get_build_tag(tag_version=""):
     """优先使用指定版本；所有来源均过滤 rc，并统一去除开头的 v/V。"""
@@ -99,6 +131,12 @@ def main():
         fail("package_name 必须是合法的 Python 包名")
     # wheel 分发名称中的分隔符统一为下划线。
     wheel_package_name = re.sub(r"[-_.]+", "_", package_name)
+    nccl_sdk_version = inputs.get("nccl_sdk_version", "2.2.1")
+    if not isinstance(nccl_sdk_version, str):
+        fail("nccl_sdk_version 必须是单个版本字符串")
+    nccl_sdk_version = re.sub(r"^[vV]", "", nccl_sdk_version)
+    if nccl_sdk_version not in {"2.1.1", "2.2.0", "2.2.1"}:
+        fail("nccl_sdk_version 候选值：2.1.1、2.2.0、2.2.1")
     candidates = {
         "python_versions": {"38", "310", "312"},
         "os_versions": {"ubuntu2004", "ubuntu2204", "ubuntu2404", "alios7u2"},
@@ -145,6 +183,11 @@ def main():
         entry["image"] = IMAGES_MAP[key]
         entry["sdk_url"] = get_sdk_url(
             sdk_version=entry["sdk_version"],
+            runtime_version=entry["runtime_version"],
+            os_version=entry["os_version"],
+        )
+        entry["nccl_url"] = get_nccl_url(
+            nccl_sdk_version=nccl_sdk_version,
             runtime_version=entry["runtime_version"],
             os_version=entry["os_version"],
         )
