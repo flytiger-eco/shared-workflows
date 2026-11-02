@@ -19,6 +19,39 @@ RELEASE_VERSION = "1.2.3+v0.3.0.ppu2.2.0"
 WHEEL_NAME = "demo_package-1.2.3+dev5-cp310-cp310-linux_x86_64.whl"
 RENAMED_WHEEL = "demo_package-1.2.3+cu130torch2.10.0ubuntu2404oe-cp310-cp310-linux_x86_64.whl"
 
+BUILD_SHIM = r'''
+ldconfig() {
+  printf 'ldconfig:%s\n' "$TEST_PHASE" >> "$RUNNER_TEMP/events"
+  if [[ "${TEST_FAIL_LDCONFIG_PHASE:-}" == "$TEST_PHASE" ]]; then
+    return 19
+  fi
+}
+source() {
+  [[ "$1" == "/usr/local/PPU_SDK/envsetup.sh" ]] || return 1
+  printf 'source\n' >> "$RUNNER_TEMP/events"
+  if [[ "${TEST_SOURCE_EXIT:-0}" != 0 ]]; then
+    return "$TEST_SOURCE_EXIT"
+  fi
+  export SDK_READY=yes
+}
+pip() {
+  "$TEST_PYTHON" -c '
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(os.environ["RUNNER_TEMP"])
+with (root / "events").open("a") as output:
+    output.write("pip\n")
+with (root / "pip-calls.jsonl").open("a") as output:
+    output.write(json.dumps(sys.argv[1:]) + "\n")
+sys.exit(int(os.environ.get("TEST_PIP_EXIT", "0")))
+' "$@"
+}
+'''
+
+
 CURL_SHIM = r'''
 python3() {
   "$TEST_PYTHON" "$@"
@@ -101,18 +134,105 @@ def build_step(workflow):
 
 
 @pytest.fixture
-def run_build(build_step, workspace):
+def build_env(workspace):
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("TEST_") and key not in ("PPU_SDK", "CUDA_SDK")}
+    return dict(env, RUNNER_TEMP=str(workspace), TEST_PYTHON=sys.executable,
+                TEST_PHASE="build", TORCH_VERSION="2.10.0")
+
+
+@pytest.fixture
+def install_sdk_step(workflow):
+    return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
+                if step.get("name") == "下载并安装 CUDA SDK")
+
+
+@pytest.fixture
+def run_sdk_install(install_sdk_step, build_step, workspace, build_env):
+    def run(**overrides):
+        env = dict(build_env, SDK_URL="https://test.invalid/ppu-sdk.tar.gz",
+                   BUILD_COMMAND='test "$SDK_READY" = yes; printf "build\\n" >> "$RUNNER_TEMP/events"')
+        env.update(overrides)
+        env = {key: value for key, value in env.items() if value is not None}
+        # 安装目标隔离到工作区，保留真实 tar/mv 执行，下载与系统命令使用替身。
+        local = workspace / "local"
+        local.mkdir(exist_ok=True)
+        script = install_sdk_step["run"].replace("/usr/local/", str(local) + "/")
+        script = script.replace("/etc/ld.so.conf.d/ppu.conf", str(workspace / "ppu.conf"))
+        shim = r'''
+wget() {
+  "$TEST_PYTHON" -c '
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tarfile
+
+root = Path(os.environ["RUNNER_TEMP"])
+with (root / "events").open("a") as output:
+    output.write("download\n")
+(root / "wget-args.json").write_text(json.dumps(sys.argv[1:]))
+if os.environ.get("TEST_WGET_EXIT", "0") != "0":
+    sys.exit(int(os.environ["TEST_WGET_EXIT"]))
+archive = Path(sys.argv[sys.argv.index("-O") + 1])
+mode = os.environ.get("TEST_ARCHIVE_MODE", "valid")
+if mode in ("empty", "corrupt"):
+    archive.write_bytes(b"" if mode == "empty" else b"invalid gzip data")
+else:
+    with tarfile.open(archive, "w:gz") as bundle:
+        name = "PPU_SDK/envsetup.sh" if mode == "valid" else "unexpected/envsetup.sh"
+        data = b"export SDK_READY=yes\n"
+        member = tarfile.TarInfo(name)
+        member.size = len(data)
+        bundle.addfile(member, io.BytesIO(data))
+' "$@"
+}
+tar() {
+  "$TEST_PYTHON" -c '
+import json
+import os
+from pathlib import Path
+import sys
+
+(Path(os.environ["RUNNER_TEMP"]) / "tar-args.json").write_text(json.dumps(sys.argv[1:]))
+' "$@"
+  if [[ "${TEST_TAR_EXIT:-0}" != 0 ]]; then
+    return "$TEST_TAR_EXIT"
+  fi
+  command tar "$@"
+}
+mv() {
+  printf 'install\n' >> "$RUNNER_TEMP/events"
+  if [[ "${TEST_MOVE_EXIT:-0}" != 0 ]]; then
+    return "$TEST_MOVE_EXIT"
+  fi
+  command mv "$@"
+}
+'''
+        script = (BUILD_SHIM + shim + "TEST_PHASE=install\n" + script
+                  + "\nTEST_PHASE=build\n" + build_step["run"])
+        result = subprocess.run(["bash"], input=script, cwd=workspace, env=env,
+                                text=True, capture_output=True, timeout=30)
+        events = workspace / "events"
+        return result, events.read_text().splitlines() if events.exists() else []
+
+    return run
+
+
+@pytest.fixture
+def run_build(build_step, workspace, build_env):
     def run(filenames=(WHEEL_NAME,), build_command=None, **overrides):
         if build_command is None:
             build_command = "\n".join(
                 f"printf 'test wheel data' > {shlex.quote('dist/' + name)}" for name in filenames
             ) or ":"
-        env = dict(os.environ, BUILD_COMMAND=build_command)
+        env = dict(build_env, BUILD_COMMAND=build_command)
         env.update(overrides)
         env.pop("WHL_NAME", None)
-        # 只模拟 SDK 初始化，编译步骤保留构建命令生成的原始文件名。
-        shim = 'source() { [[ "$1" == "/usr/local/PPU_SDK/envsetup.sh" ]]; }\n'
-        return subprocess.run(["bash"], input=shim + build_step["run"], cwd=workspace,
+        env = {key: value for key, value in env.items() if value is not None}
+        # 模拟 SDK 初始化及 Torch 安装，保留构建命令生成的原始文件名。
+        return subprocess.run(["bash"], input=BUILD_SHIM + build_step["run"], cwd=workspace,
                               env=env, text=True, capture_output=True, timeout=30)
 
     return run
@@ -461,7 +581,167 @@ def test_curl_failure_propagates(run_upload, exit_code):
     assert "已上传" not in result.stdout
 
 
-@pytest.mark.parametrize("runtime_version", ["12.8.0", "13.0.0", "13.2.0"])
+def test_sdk_install_precedes_build_for_all_matrix_jobs(workflow, install_sdk_step, build_step):
+    job = workflow["jobs"]["matrix-job"]
+    steps = job["steps"]
+    assert steps.index(install_sdk_step) + 1 == steps.index(build_step)
+    for step in (install_sdk_step, build_step):
+        assert step["shell"] == "bash"
+        assert "if" not in step
+        assert "continue-on-error" not in step
+    assert job["env"]["SDK_URL"] == "${{ matrix.sdk_url }}"
+    assert "TORCH_URL" not in job["env"]
+    assert "${{" not in install_sdk_step["run"]
+    result = subprocess.run(["bash", "-n"], input=install_sdk_step["run"], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_sdk_download_install_and_environment_precede_build(run_sdk_install, workspace):
+    url = "https://test.invalid/ppu-sdk.tar.gz?key=a&other=b"
+    result, events = run_sdk_install(SDK_URL=url)
+    assert result.returncode == 0, result.stderr
+    assert events == ["download", "install", "ldconfig:install", "ldconfig:build", "source", "pip", "build"]
+    assert (workspace / "ppu.conf").read_text().splitlines() == [
+        str(workspace / "local/PPU_SDK/lib"),
+        str(workspace / "local/PPU_SDK/CUDA_SDK/lib64"),
+    ]
+    assert (workspace / "local/PPU_SDK/envsetup.sh").read_text() == "export SDK_READY=yes\n"
+    assert json.loads((workspace / "pip-calls.jsonl").read_text()) == [
+        "install", "--no-input", "torch==2.10.0", "-i",
+        "https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple",
+    ]
+    args = json.loads((workspace / "wget-args.json").read_text())
+    assert args[-2:] == ["--", url]
+    assert {"--https-only", "--tries=3", "--timeout=30"}.issubset(args)
+    assert "--no-check-certificate" not in args
+    archive = Path(args[args.index("-O") + 1])
+    assert archive.name == "ppu-sdk.tar.gz"
+    assert archive.parent.parent == workspace
+    assert "-nv" in args
+    assert json.loads((workspace / "tar-args.json").read_text()) == [
+        "-xzf", str(archive), "-C", str(archive.parent),
+    ]
+    assert not (archive.parent / "PPU_SDK").exists()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_sdk_library_paths_append_to_existing_configuration(run_sdk_install, workspace, configured):
+    configuration = workspace / "ppu.conf"
+    configuration.write_text("/existing/lib\n")
+    overrides = {"PPU_SDK": "", "CUDA_SDK": ""}
+    expected = [str(workspace / "local/PPU_SDK/lib"), str(workspace / "local/PPU_SDK/CUDA_SDK/lib64")]
+    if configured:
+        overrides = {"PPU_SDK": "/opt/ppu", "CUDA_SDK": "/opt/cuda"}
+        expected = ["/opt/ppu/lib", "/opt/cuda/lib64"]
+    result, _ = run_sdk_install(**overrides)
+    assert result.returncode == 0, result.stderr
+    assert configuration.read_text().splitlines() == ["/existing/lib", *expected]
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_existing_sdk_target_prevents_nested_move(run_sdk_install, workspace, kind):
+    target = workspace / "local/PPU_SDK"
+    target.parent.mkdir()
+    if kind == "directory":
+        target.mkdir()
+        (target / "keep").write_text("original")
+    else:
+        target.symlink_to(workspace / "missing")
+    result, events = run_sdk_install()
+    assert result.returncode != 0
+    assert "SDK 安装目录已存在" in result.stderr
+    assert events == ["download"]
+    assert not (workspace / "ppu.conf").exists()
+    if kind == "directory":
+        assert (target / "keep").read_text() == "original"
+        assert not (target / "PPU_SDK").exists()
+    else:
+        assert target.is_symlink()
+
+
+@pytest.mark.parametrize("url", [None, ""])
+def test_missing_sdk_url_stops_before_download(run_sdk_install, url):
+    result, events = run_sdk_install(SDK_URL=url)
+    assert result.returncode != 0
+    assert "SDK_URL" in result.stderr
+    assert events == []
+
+
+@pytest.mark.parametrize("exit_code", ["4", "8"])
+def test_sdk_download_failure_prevents_install_and_build(run_sdk_install, exit_code):
+    result, events = run_sdk_install(TEST_WGET_EXIT=exit_code)
+    assert result.returncode == int(exit_code)
+    assert events == ["download"]
+
+
+@pytest.mark.parametrize("mode,error", [
+    ("empty", "SDK 压缩包为空"), ("corrupt", ""), ("missing", "PPU_SDK/envsetup.sh"),
+])
+def test_invalid_sdk_archive_prevents_install_and_build(run_sdk_install, workspace, mode, error):
+    result, events = run_sdk_install(TEST_ARCHIVE_MODE=mode)
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert events == ["download"]
+    assert not (workspace / "local/PPU_SDK").exists()
+    assert not (workspace / "ppu.conf").exists()
+
+
+def test_sdk_extraction_failure_prevents_install_and_build(run_sdk_install, workspace):
+    result, events = run_sdk_install(TEST_TAR_EXIT="18")
+    assert result.returncode == 18
+    assert events == ["download"]
+    assert not (workspace / "local/PPU_SDK").exists()
+    assert not (workspace / "ppu.conf").exists()
+
+
+def test_sdk_move_failure_prevents_environment_and_build(run_sdk_install):
+    result, events = run_sdk_install(TEST_MOVE_EXIT="23")
+    assert result.returncode == 23
+    assert events == ["download", "install"]
+
+
+@pytest.mark.parametrize("phase", ["install", "build"])
+def test_ldconfig_failure_stops_before_torch_and_build(run_sdk_install, phase):
+    result, events = run_sdk_install(TEST_FAIL_LDCONFIG_PHASE=phase)
+    assert result.returncode == 19
+    expected = ["download", "install", "ldconfig:install"]
+    assert events == (expected if phase == "install" else expected + ["ldconfig:build"])
+
+
+def test_sdk_environment_failure_prevents_torch_and_build(run_sdk_install):
+    result, events = run_sdk_install(TEST_SOURCE_EXIT="17")
+    assert result.returncode == 17
+    assert events == ["download", "install", "ldconfig:install", "ldconfig:build", "source"]
+
+
+@pytest.mark.parametrize("torch_version", [None, ""])
+def test_empty_torch_skips_install_but_runs_build(run_sdk_install, workspace, torch_version):
+    result, events = run_sdk_install(TORCH_VERSION=torch_version)
+    assert result.returncode == 0, result.stderr
+    assert events == ["download", "install", "ldconfig:install", "ldconfig:build", "source", "build"]
+    assert not (workspace / "pip-calls.jsonl").exists()
+
+
+@pytest.mark.parametrize("torch_version", ["2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0", "2.11.0", "2.13.0"])
+def test_build_installs_selected_torch_before_command(run_build, workspace, torch_version):
+    result = run_build(TORCH_VERSION=torch_version, build_command=(
+        'test "$SDK_READY" = yes\nprintf "build\\n" >> "$RUNNER_TEMP/events"'
+    ))
+    assert result.returncode == 0, result.stderr
+    assert (workspace / "events").read_text().splitlines() == ["ldconfig:build", "source", "pip", "build"]
+    assert json.loads((workspace / "pip-calls.jsonl").read_text()) == [
+        "install", "--no-input", f"torch=={torch_version}", "-i",
+        "https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple",
+    ]
+
+
+def test_torch_install_failure_prevents_build(run_sdk_install):
+    result, events = run_sdk_install(TEST_PIP_EXIT="23")
+    assert result.returncode == 23
+    assert events == ["download", "install", "ldconfig:install", "ldconfig:build", "source", "pip"]
+
+
+@pytest.mark.parametrize("runtime_version", ["12.6.0", "12.8.0", "12.9.0", "13.0.0", "13.2.0"])
 def test_runtime_environment_reaches_build_command(workflow, run_build, runtime_version):
     runtime_env = workflow["jobs"]["matrix-job"]["env"]["RUNTIME_VERSION"].replace(
         "${{ matrix.runtime_version }}", runtime_version)
@@ -586,7 +866,8 @@ def test_nonrelease_matrix_build_stops_after_original_wheel_artifact(
             continue
         executed.append(step["name"])
         if step["name"] == "编译":
-            result = run_build(build_command=command, RELEASE_VERSION=entry["release_version"])
+            result = run_build(build_command=command, RELEASE_VERSION=entry["release_version"],
+                               TORCH_VERSION=entry["torch_version"])
             successful = result.returncode == 0
         elif step["name"] == "收集 wheel 到 dist":
             result = run_collect()
