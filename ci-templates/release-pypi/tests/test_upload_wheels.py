@@ -33,6 +33,9 @@ source() {
     return "$TEST_SOURCE_EXIT"
   fi
   export SDK_READY=yes
+  if [[ -n "${TEST_SDK_LIBRARY_PATH+x}" ]]; then
+    export LD_LIBRARY_PATH="$TEST_SDK_LIBRARY_PATH"
+  fi
 }
 pip() {
   "$TEST_PYTHON" -c '
@@ -134,10 +137,10 @@ def build_step(workflow):
 
 
 @pytest.fixture
-def build_env(workspace):
+def build_env(workspace, install_nccl_step):
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith("TEST_") and key not in ("PPU_SDK", "CUDA_SDK")}
-    return dict(env, RUNNER_TEMP=str(workspace), TEST_PYTHON=sys.executable,
+           if not key.startswith("TEST_") and key not in ("PPU_SDK", "CUDA_SDK", "PCCL_PATH", "NCCL_PATH")}
+    return dict(env, **install_nccl_step["env"], RUNNER_TEMP=str(workspace), TEST_PYTHON=sys.executable,
                 TEST_PHASE="build", TORCH_VERSION="2.10.0")
 
 
@@ -145,6 +148,91 @@ def build_env(workspace):
 def install_sdk_step(workflow):
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
                 if step.get("name") == "下载并安装 CUDA SDK")
+
+
+@pytest.fixture
+def install_nccl_step(workflow):
+    return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
+                if step.get("name") == "下载并安装 NCCL")
+
+
+@pytest.fixture
+def run_nccl_install(install_nccl_step, build_step, workspace, build_env):
+    def run(**overrides):
+        local = workspace / "local"
+        local.mkdir(exist_ok=True)
+        step_env = {key: value.replace("/usr/local/", str(local) + "/")
+                    for key, value in install_nccl_step["env"].items()}
+        env = dict(build_env, NCCL_URL="https://test.invalid/nccl.tar.gz", TEST_PHASE="nccl",
+                   GITHUB_ENV=str(workspace / "github-env"),
+                   BUILD_COMMAND='test -d "$PCCL_PATH/lib"; test -d "$NCCL_PATH/lib"; '
+                                 'printf "build\\n" >> "$RUNNER_TEMP/events"')
+        env.update(step_env)
+        env.update(overrides)
+        env = {key: value for key, value in env.items() if value is not None}
+        # 系统路径隔离到工作区；网络和 ldconfig 使用替身，真实执行 tar/mv。
+        script = install_nccl_step["run"].replace("/etc/ld.so.conf.d/nccl.conf", str(workspace / "nccl.conf"))
+        shim = r'''
+wget() {
+  "$TEST_PYTHON" -c '
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tarfile
+
+root = Path(os.environ["RUNNER_TEMP"])
+with (root / "events").open("a") as output:
+    output.write("nccl-download\n")
+(root / "nccl-wget-args.json").write_text(json.dumps(sys.argv[1:]))
+if os.environ.get("TEST_WGET_EXIT", "0") != "0":
+    sys.exit(int(os.environ["TEST_WGET_EXIT"]))
+archive = Path(sys.argv[sys.argv.index("-O") + 1])
+mode = os.environ.get("TEST_ARCHIVE_MODE", "valid")
+if mode in ("empty", "corrupt"):
+    archive.write_bytes(b"" if mode == "empty" else b"invalid gzip data")
+else:
+    names = ["pccl/lib/libpccl.so", "pccl/nccl_wrapper/lib/libnccl.so", "pccl/bin/pccl-tool"]
+    if mode == "missing-pccl":
+        names = names[1:]
+    elif mode == "missing-wrapper":
+        names = names[:1]
+    with tarfile.open(archive, "w:gz") as bundle:
+        for name in names:
+            member = tarfile.TarInfo(name)
+            data = b"test nccl data"
+            member.size = len(data)
+            bundle.addfile(member, io.BytesIO(data))
+' "$@"
+}
+tar() {
+  if [[ "${TEST_TAR_EXIT:-0}" != 0 ]]; then
+    return "$TEST_TAR_EXIT"
+  fi
+  command tar "$@"
+}
+mv() {
+  printf 'nccl-install\n' >> "$RUNNER_TEMP/events"
+  if [[ "${TEST_MOVE_EXIT:-0}" != 0 ]]; then
+    return "$TEST_MOVE_EXIT"
+  fi
+  command mv "$@"
+}
+'''
+        result = subprocess.run(["bash"], input=BUILD_SHIM + shim + script, cwd=workspace, env=env,
+                                text=True, capture_output=True, timeout=30)
+        if result.returncode == 0:
+            # 模拟 Actions 的独立 step，仅从 GITHUB_ENV 继承安装步骤导出的变量。
+            next_env = {key: value for key, value in env.items() if key not in step_env}
+            next_env.update(dict(line.split("=", 1) for line in (workspace / "github-env").read_text().splitlines()))
+            next_env["TEST_PHASE"] = "build"
+            result = subprocess.run(["bash"], input=BUILD_SHIM + build_step["run"], cwd=workspace, env=next_env,
+                                    text=True, capture_output=True, timeout=30)
+        events = workspace / "events"
+        return result, events.read_text().splitlines() if events.exists() else []
+
+    return run
 
 
 @pytest.fixture
@@ -581,19 +669,134 @@ def test_curl_failure_propagates(run_upload, exit_code):
     assert "已上传" not in result.stdout
 
 
-def test_sdk_install_precedes_build_for_all_matrix_jobs(workflow, install_sdk_step, build_step):
+def test_sdk_install_precedes_build_for_all_matrix_jobs(workflow, install_sdk_step, install_nccl_step, build_step):
     job = workflow["jobs"]["matrix-job"]
     steps = job["steps"]
-    assert steps.index(install_sdk_step) + 1 == steps.index(build_step)
-    for step in (install_sdk_step, build_step):
+    assert steps.index(install_sdk_step) + 1 == steps.index(install_nccl_step)
+    assert steps.index(install_nccl_step) + 1 == steps.index(build_step)
+    for step in (install_sdk_step, install_nccl_step, build_step):
         assert step["shell"] == "bash"
         assert "if" not in step
         assert "continue-on-error" not in step
+        assert "${{" not in step["run"]
+        result = subprocess.run(["bash", "-n"], input=step["run"], text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
     assert job["env"]["SDK_URL"] == "${{ matrix.sdk_url }}"
+    assert job["env"]["NCCL_URL"] == "${{ matrix.nccl_url }}"
+    assert "NCCL_URL=$NCCL_URL" in steps[0]["run"]
     assert "TORCH_URL" not in job["env"]
-    assert "${{" not in install_sdk_step["run"]
-    result = subprocess.run(["bash", "-n"], input=install_sdk_step["run"], text=True, capture_output=True)
+    assert install_nccl_step["env"] == {
+        "PCCL_PATH": "/usr/local/pccl", "NCCL_PATH": "/usr/local/pccl/nccl_wrapper",
+    }
+    for name in install_nccl_step["env"]:
+        assert name not in job["env"]
+        assert all(name not in step.get("env", {}) for step in steps if step is not install_nccl_step)
+    assert workflow["on"]["workflow_call"]["inputs"]["nccl_sdk_version"]["default"] == "2.2.1"
+
+
+def test_nccl_installs_libraries_and_exports_paths_between_steps(run_nccl_install, workspace):
+    url = "https://test.invalid/nccl.tar.gz?key=a&other=b"
+    configuration = workspace / "nccl.conf"
+    configuration.write_text("/existing/lib\n")
+    unrelated = workspace / "keep.txt"
+    unrelated.write_text("keep")
+    result, events = run_nccl_install(NCCL_URL=url)
     assert result.returncode == 0, result.stderr
+    assert events == ["nccl-download", "nccl-install", "ldconfig:nccl", "ldconfig:build", "source", "pip", "build"]
+    pccl = workspace / "local/pccl"
+    assert (pccl / "lib/libpccl.so").read_bytes() == b"test nccl data"
+    assert (pccl / "nccl_wrapper/lib/libnccl.so").read_bytes() == b"test nccl data"
+    assert configuration.read_text().splitlines() == ["/existing/lib", str(pccl / "lib"), str(pccl / "nccl_wrapper/lib")]
+    assert (workspace / "github-env").read_text().splitlines() == [
+        f"PCCL_PATH={pccl}", f"NCCL_PATH={pccl}/nccl_wrapper",
+    ]
+    args = json.loads((workspace / "nccl-wget-args.json").read_text())
+    assert args[-2:] == ["--", url]
+    assert {"-nv", "--https-only", "--tries=3", "--timeout=30"}.issubset(args)
+    assert "--no-check-certificate" not in args
+    archive = Path(args[args.index("-O") + 1])
+    assert archive.name == "nccl.tar.gz"
+    assert archive.parent.parent == workspace
+    assert not archive.parent.exists()
+    assert unrelated.read_text() == "keep"
+
+
+@pytest.mark.parametrize("library_path", [None, "", "/existing/lib"])
+@pytest.mark.parametrize("sdk_overwrites", [False, True])
+def test_nccl_environment_reaches_build_after_sdk_setup(run_nccl_install, workspace, library_path, sdk_overwrites):
+    command = '''"$TEST_PYTHON" -c 'import json, os; print(json.dumps({
+        key: os.environ.get(key) for key in ("NCCL_URL", "PCCL_PATH", "NCCL_PATH", "PATH", "LD_LIBRARY_PATH")
+    }))' '''
+    overrides = {"LD_LIBRARY_PATH": library_path, "BUILD_COMMAND": command}
+    if sdk_overwrites:
+        overrides["TEST_SDK_LIBRARY_PATH"] = "/sdk/lib"
+    result, _ = run_nccl_install(**overrides)
+    assert result.returncode == 0, result.stderr
+    values = json.loads(result.stdout)
+    pccl = str(workspace / "local/pccl")
+    assert values["NCCL_URL"] == "https://test.invalid/nccl.tar.gz"
+    assert values["PCCL_PATH"] == pccl
+    assert values["NCCL_PATH"] == pccl + "/nccl_wrapper"
+    assert values["PATH"] == pccl + "/bin:" + os.environ["PATH"]
+    previous = "/sdk/lib" if sdk_overwrites else library_path
+    assert values["LD_LIBRARY_PATH"] == pccl + "/nccl_wrapper/lib:" + pccl + "/lib" + (
+        ":" + previous if previous else ""
+    )
+
+
+@pytest.mark.parametrize("name", ["NCCL_URL", "PCCL_PATH", "NCCL_PATH"])
+@pytest.mark.parametrize("value", [None, ""])
+def test_missing_nccl_install_inputs_stop_before_download(run_nccl_install, name, value):
+    result, events = run_nccl_install(**{name: value})
+    assert result.returncode != 0
+    assert name in result.stderr
+    assert events == []
+
+
+@pytest.mark.parametrize("mode", ["empty", "corrupt", "missing-pccl", "missing-wrapper"])
+def test_invalid_nccl_archive_prevents_install_and_cleans_temp(run_nccl_install, workspace, mode):
+    result, events = run_nccl_install(TEST_ARCHIVE_MODE=mode)
+    assert result.returncode != 0
+    assert events == ["nccl-download"]
+    assert not (workspace / "local/pccl").exists()
+    assert not (workspace / "nccl.conf").exists()
+    assert not (workspace / "github-env").exists()
+    assert not list(workspace.glob("nccl.*"))
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_existing_nccl_target_is_preserved(run_nccl_install, workspace, kind):
+    target = workspace / "local/pccl"
+    target.parent.mkdir()
+    if kind == "directory":
+        target.mkdir()
+        (target / "keep").write_text("original")
+    else:
+        target.symlink_to(workspace / "missing")
+    result, events = run_nccl_install()
+    assert result.returncode != 0
+    assert "NCCL 安装目录已存在" in result.stderr
+    assert events == ["nccl-download"]
+    assert not (workspace / "github-env").exists()
+    if kind == "directory":
+        assert (target / "keep").read_text() == "original"
+        assert not (target / "pccl").exists()
+    else:
+        assert target.is_symlink()
+
+
+@pytest.mark.parametrize("overrides,code,events", [
+    ({"TEST_WGET_EXIT": "8"}, 8, ["nccl-download"]),
+    ({"TEST_TAR_EXIT": "18"}, 18, ["nccl-download"]),
+    ({"TEST_MOVE_EXIT": "23"}, 23, ["nccl-download", "nccl-install"]),
+    ({"TEST_FAIL_LDCONFIG_PHASE": "nccl"}, 19, ["nccl-download", "nccl-install", "ldconfig:nccl"]),
+])
+def test_nccl_install_failure_stops_build_and_environment_export(run_nccl_install, workspace, overrides, code, events):
+    result, actual = run_nccl_install(**overrides)
+    assert result.returncode == code
+    assert actual == events
+    assert not (workspace / "github-env").exists()
+    assert not [path for path in workspace.glob("nccl.*") if path.is_dir()]
 
 
 def test_sdk_download_install_and_environment_precede_build(run_sdk_install, workspace):

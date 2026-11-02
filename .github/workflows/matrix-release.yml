@@ -40,6 +40,11 @@ on:
         required: true
         type: string
         default: '["2.1.1"]'
+      nccl_sdk_version:
+        description: '单个 NCCL SDK 版本，候选值：2.1.1、2.2.0、2.2.1；支持 v/V 前缀，不参与矩阵展开'
+        required: false
+        type: string
+        default: '2.2.1'
       template_repository:
         description: '保存本工作流及 prepare_matrix.py 的仓库，格式为 owner/repo'
         type: string
@@ -283,6 +288,7 @@ jobs:
       WHL_NAME: ${{ matrix.whl_name }}
       CONTAINER_IMAGE: ${{ matrix.image }}
       SDK_URL: ${{ matrix.sdk_url }}
+      NCCL_URL: ${{ matrix.nccl_url }}
     defaults:
       run:
         shell: sh
@@ -298,6 +304,7 @@ jobs:
             "RELEASE_VERSION=$RELEASE_VERSION" \
             "WHL_NAME=$WHL_NAME" \
             "SDK_URL=$SDK_URL" \
+            "NCCL_URL=$NCCL_URL" \
             "CONTAINER_IMAGE=$CONTAINER_IMAGE"
       # 默认检出调用方仓库及其触发版本，不是模板仓库。
       - name: 检出待编译仓库
@@ -333,6 +340,38 @@ jobs:
           echo "${CUDA_SDK:-/usr/local/PPU_SDK/CUDA_SDK}/lib64" >> /etc/ld.so.conf.d/ppu.conf
           ldconfig
 
+      - name: 下载并安装 NCCL
+        shell: bash
+        env:
+          PCCL_PATH: /usr/local/pccl
+          NCCL_PATH: /usr/local/pccl/nccl_wrapper
+        run: |
+          set -euo pipefail
+          : "${NCCL_URL:?NCCL_URL 不能为空}"
+          : "${PCCL_PATH:?PCCL_PATH 不能为空}"
+          : "${NCCL_PATH:?NCCL_PATH 不能为空}"
+          download_dir="$(mktemp -d "$RUNNER_TEMP/nccl.XXXXXX")"
+          trap 'rm -rf -- "$download_dir"' EXIT
+          wget -nv --https-only --tries=3 --timeout=30 \
+            -O "$download_dir/nccl.tar.gz" -- "$NCCL_URL"
+          if [[ ! -s "$download_dir/nccl.tar.gz" ]]; then
+            printf '%s\n' '::error::下载的 NCCL 压缩包为空' >&2
+            exit 1
+          fi
+          tar -xzf "$download_dir/nccl.tar.gz" -C "$download_dir"
+          if [[ ! -d "$download_dir/pccl/lib" || ! -d "$download_dir/pccl/nccl_wrapper/lib" ]]; then
+            printf '%s\n' '::error::NCCL 压缩包缺少 pccl/lib 或 pccl/nccl_wrapper/lib' >&2
+            exit 1
+          fi
+          if [[ -e "$PCCL_PATH" || -L "$PCCL_PATH" ]]; then
+            printf '%s\n' '::error::NCCL 安装目录已存在，拒绝嵌套移动或覆盖' >&2
+            exit 1
+          fi
+          mv "$download_dir/pccl" "$PCCL_PATH"
+          printf '%s\n' "$PCCL_PATH/lib" "$NCCL_PATH/lib" >> /etc/ld.so.conf.d/nccl.conf
+          ldconfig
+          printf '%s\n' "PCCL_PATH=$PCCL_PATH" "NCCL_PATH=$NCCL_PATH" >> "$GITHUB_ENV"
+
       - name: 编译
         shell: bash
         env:
@@ -342,6 +381,8 @@ jobs:
           : "${BUILD_COMMAND:?build_command 不能为空}"
           ldconfig
           source /usr/local/PPU_SDK/envsetup.sh
+          export PATH="${PCCL_PATH}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${NCCL_PATH}/lib:${PCCL_PATH}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           if [[ -n "${TORCH_VERSION:-}" ]]; then
             pip install --no-input "torch==$TORCH_VERSION" -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
           fi

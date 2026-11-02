@@ -62,6 +62,17 @@ def expected_sdk_url(sdk_version, runtime_version, os_version):
     )
 
 
+def expected_nccl_url(nccl_sdk_version, runtime_version, os_version):
+    nccl_version = {
+        "12.6.0": "2.22.3", "12.8.0": "2.27.3", "12.9.0": "2.27.3",
+        "13.0.0": "2.27.3-v13", "13.2.0": "2.27.3-v13",
+    }[runtime_version]
+    return (
+        f"https://pkg.flytiger-eco.com/artifactory/generic-local/NCCL/v{nccl_sdk_version}/"
+        f"nccl-{nccl_version}_{os_version}_sdk-v{nccl_sdk_version}.tar.gz"
+    )
+
+
 @pytest.fixture
 def script():
     # 按文件路径加载，避免导入 deep_gemm 及其硬件依赖。
@@ -140,6 +151,53 @@ def test_sdk_url_normalizes_prefixes(script, prefix):
     )
 
 
+@pytest.mark.parametrize("runtime_version,nccl_version", [
+    ("11.0.3", "2.8.3"),
+    ("11.1.1", "2.8.3"),
+    ("11.2.1", "2.8.4"),
+    ("11.3.1", "2.9.9"),
+    ("11.4.2", "2.11.4"),
+    ("11.5.0", "2.11.4"),
+    ("11.6.2", "2.12.10"),
+    ("11.7.1", "2.17.1"),
+    ("11.8.0", "2.17.1"),
+    ("12.0.1", "2.17.1"),
+    ("12.1.1", "2.18.3"),
+    ("12.2.2", "2.19.3"),
+    ("12.3.0", "2.19.3"),
+    ("12.4.1", "2.21.5"),
+    ("12.5.1", "2.22.3"),
+    ("12.6.0", "2.22.3"),
+    ("12.8.0", "2.27.3"),
+    ("12.9.0", "2.27.3"),
+    ("13.0.0", "2.27.3-v13"),
+    ("13.1.0", "2.27.3-v13"),
+    ("13.2.0", "2.27.3-v13"),
+    ("13.3.0", "2.27.3-v13"),
+])
+@pytest.mark.parametrize("os_version", ALL_VERSIONS["os_versions"])
+def test_nccl_url_runtime_mapping(script, runtime_version, nccl_version, os_version):
+    assert script.get_nccl_url("2.2.0", runtime_version, os_version) == (
+        "https://pkg.flytiger-eco.com/artifactory/generic-local/NCCL/v2.2.0/"
+        f"nccl-{nccl_version}_{os_version}_sdk-v2.2.0.tar.gz"
+    )
+
+
+@pytest.mark.parametrize("sdk_prefix", ["", "v", "V"])
+@pytest.mark.parametrize("runtime_prefix", ["", "cuda", "cu", "CUDA", "CU"])
+def test_nccl_url_normalizes_prefixes(script, sdk_prefix, runtime_prefix):
+    assert script.get_nccl_url(sdk_prefix + "2.1.1", runtime_prefix + "13.0.0", "ubuntu2404") == (
+        "https://pkg.flytiger-eco.com/artifactory/generic-local/NCCL/v2.1.1/"
+        "nccl-2.27.3-v13_ubuntu2404_sdk-v2.1.1.tar.gz"
+    )
+
+
+@pytest.mark.parametrize("runtime_version", ["", "12.7.0", "13.4.0", "13.0"])
+def test_nccl_url_rejects_unmapped_runtime(script, runtime_version):
+    with pytest.raises(SystemExit, match="::error::Runtime version .* 没有对应的 NCCL 版本"):
+        script.get_nccl_url("2.2.0", runtime_version, "ubuntu2204")
+
+
 @pytest.mark.parametrize("runtime", ["12.6.0", "12.8.0", "12.9.0", "13.0.0", "13.2.0"])
 @pytest.mark.parametrize("torch", ["", "2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0", "2.11.0", "2.13.0"])
 def test_all_cuda_and_torch_candidates_share_base_image(run_matrix, runtime, torch):
@@ -147,6 +205,7 @@ def test_all_cuda_and_torch_candidates_share_base_image(run_matrix, runtime, tor
                             torch_versions=json.dumps([torch])))[0]
     assert entry["image"] == "test.invalid/matrix:ubuntu2204-py310"
     assert entry["sdk_url"] == expected_sdk_url("2.1.1", runtime, "ubuntu2204")
+    assert entry["nccl_url"] == expected_nccl_url("2.2.1", runtime, "ubuntu2204")
     wheel_runtime = "".join(runtime.split(".")[:2])
     torch_suffix = f"torch{torch}" if torch else ""
     assert entry["whl_name"] == (
@@ -166,6 +225,7 @@ def test_each_synthetic_image(script, run_matrix, capsys, os_version, python_ver
         "sdk_version": "2.1.1",
         "image": script.IMAGES_MAP[f"{os_version}-py{python_version}"],
         "sdk_url": expected_sdk_url("2.1.1", "13.0.0", os_version),
+        "nccl_url": expected_nccl_url("2.2.1", "13.0.0", os_version),
         "tag": "1.0.0+v0.3.0",
         "release_version": "1.0.0+v0.3.0.ppu2.1.1",
         "whl_name": f"deep_gemm-1.0.0+cu130torch2.11.0{os_version}oe-cp{python_version}-cp{python_version}-linux_x86_64.whl",
@@ -183,6 +243,7 @@ def test_package_name_changes_wheel_name_without_changing_axes(script, run_matri
         **expected_versions,
         "image": script.IMAGES_MAP["ubuntu2204-py310"],
         "sdk_url": expected_sdk_url("2.1.1", "13.0.0", "ubuntu2204"),
+        "nccl_url": expected_nccl_url("2.2.1", "13.0.0", "ubuntu2204"),
         "tag": "1.0.0+v0.3.0",
         "release_version": "1.0.0+v0.3.0.ppu2.1.1",
         "whl_name": "another_package-1.0.0+cu130torch2.11.0ubuntu2204oe-cp310-cp310-linux_x86_64.whl",
@@ -202,8 +263,9 @@ def test_full_five_axis_cartesian_product(script, run_matrix, monkeypatch, capsy
     )
     assert len(result) == 216
     for entry in result:
-        assert set(entry) == set(fields) | {"image", "sdk_url", "tag", "release_version", "whl_name"}
+        assert set(entry) == set(fields) | {"image", "sdk_url", "nccl_url", "tag", "release_version", "whl_name"}
         assert entry["sdk_url"] == expected_sdk_url(entry["sdk_version"], entry["runtime_version"], entry["os_version"])
+        assert entry["nccl_url"] == expected_nccl_url("2.2.1", entry["runtime_version"], entry["os_version"])
         assert entry["tag"] == "1.0.0+v0.3.0"
         assert entry["image"] == images[image_key(entry)]
         assert entry["release_version"] == f"1.0.0+v0.3.0.ppu{entry['sdk_version']}"
@@ -241,6 +303,42 @@ def test_sdk_resolver_receives_normalized_axes(script, run_matrix, monkeypatch):
     assert result[0]["python_version"] == "310"
     assert "torch_url" not in result[0]
     assert result[0]["sdk_url"] == "https://test.invalid/sdk.tar.gz"
+
+
+@pytest.mark.parametrize("nccl_sdk_version", ["2.1.1", "2.2.0", "2.2.1"])
+@pytest.mark.parametrize("prefix", ["", "v", "V"])
+def test_nccl_sdk_version_is_shared_without_expanding_matrix(run_matrix, nccl_sdk_version, prefix):
+    entries = run_matrix(dict(DEFAULT_INPUTS, nccl_sdk_version=prefix + nccl_sdk_version,
+                              runtime_versions='["12.6.0", "13.0.0"]',
+                              sdk_versions='["2.1.1", "2.2.0"]'))
+    assert len(entries) == 4
+    assert len({entry["nccl_url"] for entry in entries}) == 2
+    for entry in entries:
+        assert entry["nccl_url"] == expected_nccl_url(nccl_sdk_version, entry["runtime_version"], "ubuntu2204")
+        assert "nccl_sdk_version" not in entry
+
+
+@pytest.mark.parametrize("value", [None, 2, False, [], {}, ["2.2.1"], "", "2.3.0", "../2.2.1",
+                                        '["2.2.1"]', "2.2.1\n", "vv2.2.1", "$(id)"])
+def test_invalid_nccl_sdk_version_fails_before_output(run_matrix, output_file, value):
+    with pytest.raises(SystemExit, match="::error::nccl_sdk_version"):
+        run_matrix(dict(DEFAULT_INPUTS, nccl_sdk_version=value))
+    output_file.assert_not_called()
+
+
+@pytest.mark.parametrize("tag", ["1.0.0", "1.0.0RC1"])
+def test_default_nccl_sdk_version_applies_to_release_and_nonrelease(run_matrix, monkeypatch, tag):
+    monkeypatch.setenv("GITHUB_REF_NAME", tag)
+    entry = run_matrix()[0]
+    assert entry["nccl_url"] == expected_nccl_url("2.2.1", "13.0.0", "ubuntu2204")
+
+
+def test_nccl_resolver_receives_normalized_version_and_axes(script, run_matrix, monkeypatch):
+    resolver = create_autospec(script.get_nccl_url, return_value="https://test.invalid/nccl.tar.gz")
+    monkeypatch.setattr(script, "get_nccl_url", resolver)
+    entry = run_matrix(dict(DEFAULT_INPUTS, nccl_sdk_version="V2.2.0"))[0]
+    resolver.assert_called_once_with(nccl_sdk_version="2.2.0", runtime_version="13.0.0", os_version="ubuntu2204")
+    assert entry["nccl_url"] == "https://test.invalid/nccl.tar.gz"
 
 
 def test_only_selected_image_mapping_is_required(script, run_matrix, monkeypatch):
@@ -374,6 +472,7 @@ def test_script_entrypoint_uses_real_image_mapping(monkeypatch, torch_version):
         "sdk_version": "2.2.0",
         "image": namespace["IMAGES_MAP"]["ubuntu2404-py312"],
         "sdk_url": expected_sdk_url("2.2.0", "13.0.0", "ubuntu2404"),
+        "nccl_url": expected_nccl_url("2.2.1", "13.0.0", "ubuntu2404"),
         "tag": "1.0.0+v0.3.0",
         "release_version": "1.0.0+v0.3.0.ppu2.2.0",
         "whl_name": (
