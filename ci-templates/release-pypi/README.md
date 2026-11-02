@@ -100,7 +100,7 @@ jobs:
       # template_token: ${{ secrets.TEMPLATE_TOKEN }}
 ```
 
-This example uses the two image configurations currently available. `pip wheel` is only a generic example; ensure that the project's build dependencies are installed, or replace it with your project's own Bash build command.
+示例中的两个 Torch 版本共用 `ubuntu2404-py312` 基础镜像，SDK 和 Torch 在构建前按矩阵参数安装。`pip wheel` 仅作为通用示例，其他项目依赖仍需自行安装，或使用项目实际的 Bash 构建命令。
 
 For production use, **replace both `@main` in `uses` and `template_ref` with the same full commit SHA**. The former determines the workflow version, while the latter determines the version of the tool scripts checked out. For cross-repository calls, do not use the caller's `github.sha` as the template version.
 
@@ -116,39 +116,38 @@ All arrays are passed as **JSON strings**, not YAML arrays. All version arrays m
 | `framework` | Yes | None | Framework module name detected by the installation template, such as `torch`; an empty string may be passed explicitly; not used in matrix expansion |
 | `python_versions` | Yes | `'["310"]'` | Allowed: `"38"`, `"310"`, `"312"`; JSON integers are also accepted, e.g., `[38,310]` |
 | `os_versions` | Yes | `'["ubuntu2204"]'` | Allowed: `ubuntu2004`, `ubuntu2204`, `ubuntu2404`, `alios7u2` |
-| `runtime_versions` | Yes | `'["13.0.0"]'` | Allowed: `"13.0.0"`, `"13.2.0"`; elements must be strings |
-| `torch_versions` | Yes | `'["2.8.0"]'` | Allowed: `"2.8.0"`, `"2.10.0"`, `"2.13.0"`; `'[""]'` means no Torch version is included |
-| `sdk_versions` | Yes | `'["2.1.0"]'` | Allowed: `"2.1.0"`, `"2.2.0"` |
+| `runtime_versions` | Yes | `'["13.0.0"]'` | CUDA 候选值：`"12.6.0"`、`"12.8.0"`、`"12.9.0"`、`"13.0.0"`、`"13.2.0"`；元素必须为字符串 |
+| `torch_versions` | Yes | `'["2.13.0"]'` | 候选值：`"2.6.0"`、`"2.7.0"`、`"2.8.0"`、`"2.9.0"`、`"2.10.0"`、`"2.11.0"`、`"2.13.0"`；`'[""]'` 跳过 Torch 安装及 wheel 名中的 Torch 版本 |
+| `sdk_versions` | Yes | `'["2.1.1"]'` | 候选值：`"2.1.1"`、`"2.2.0"`，由 `SDK_MAP` 决定 |
 | `template_repository` | No | `flytiger-eco/shared-workflows` | 保存辅助脚本的仓库；使用 fork 时同步调整 |
 | `template_ref` | Yes | None | Template repository revision; must match the revision referenced in `uses` |
 | `build_command` | Yes | None | Bash command executed at the root of the caller's repository; supports multiple lines; must come from trusted configuration only |
 | `tag_version` | No | Empty string | Overrides the release version without changing the code revision checked out |
 
-A valid input value does not guarantee that a corresponding image exists. The matrix expands as the Cartesian product of the five version axes, and **every combination must have an image mapping**. Combinations without mappings are not automatically filtered out.
+矩阵仍按五个版本轴的笛卡尔积展开，最多 256 个任务；镜像仅按 OS/Python 选择。每个选中的 OS/Python 组合必须存在映射，不会自动过滤缺失项。SDK 下载包和 Torch 包是否可用，由后续安装步骤验证。
 
 ### Current Image Configuration
 
-Image mappings are maintained in `IMAGES_MAP` in [`prepare_matrix.py`](ci-templates/release-pypi/scripts/prepare_matrix.py). Currently, only the following are available:
+基础镜像映射维护在 [`prepare_matrix.py`](scripts/prepare_matrix.py) 的 `IMAGES_MAP` 中：
 
-| OS | Python | Runtime | SDK | Torch |
-| --- | --- | --- | --- | --- |
-| `ubuntu2404` | `312` | `13.0.0` | `2.2.0` | `2.13.0` |
-| `ubuntu2404` | `312` | `13.0.0` | `2.2.0` | `2.10.0` |
+| OS | Python | 基础镜像 |
+| --- | --- | --- |
+| `ubuntu2404` | `312` | `pkg.flytiger-eco.com/docker_tool/ubuntu2404-py312:06` |
+| `ubuntu2204` | `310` | `pkg.flytiger-eco.com/docker_tool/ubuntu2204-py310:05` |
+| `ubuntu2004` | `38` | `pkg.flytiger-eco.com/docker_tool/ubuntu2004-py38:01` |
+| `alios7u2` | `312` | `pkg.flytiger-eco.com/docker_tool/alios7u2-py312:03` |
+| `alios7u2` | `310` | `pkg.flytiger-eco.com/docker_tool/alios7u2-py310:08` |
+| `alios7u2` | `38` | `pkg.flytiger-eco.com/docker_tool/alios7u2-py38:10` |
 
-The corresponding images are, respectively:
+默认 OS/Python 组合已有映射。添加基础镜像时使用 `{os_version}-py{python_version}` 作为键；不同 CUDA、SDK 和 Torch 版本共用该基础镜像。
+
+`SDK_MAP` 维护 SDK 版本与包名 hash 的对应关系，矩阵为发布和非发布构建都生成 `sdk_url`，格式为：
 
 ```text
-pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.0-2.13.0-ubuntu24.04-cuda13.0-py312-20261001
-pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.0-2.10.0-ubuntu24.04-cuda13.0-py312-20261001
+https://pkg.flytiger-eco.com/artifactory/generic-local/CUDA_SDK/v{sdk_version}/PPU_SDK_cuda-{runtime_version}-{os_version}-{sdk_version}-{hash}.tar.gz
 ```
 
-The default version combination in the inputs currently has no corresponding mapping. Explicitly use the versions in the Quick Start example. To add a combination, update `IMAGES_MAP` using the following key format:
-
-```text
-{os_version}-py{python_version}-sdk{sdk_version}-cuda{runtime_version}-torch{torch_version}
-```
-
-Errors about missing entries in `BUILD_CONTAINER_IMAGES` refer to this mapping table; the current implementation does not load image configuration from an environment variable of the same name. Although `torch_versions: '[""]'` is a valid input, no corresponding image is currently available.
+`BUILD_CONTAINER_IMAGES` 缺失错误指向上述镜像映射，脚本不会从同名环境变量加载配置。`torch_versions: '[""]'` 使用同一个基础镜像，但跳过 Torch 安装。
 
 ## Versioning and Artifact Naming
 
@@ -179,7 +178,11 @@ The final wheel renaming step does not modify internal metadata again. The SDK v
 
 ## Build Conventions and Publishing Locations
 
-The build step first sources `/usr/local/PPU_SDK/envsetup.sh`, then executes `build_command`. The build image must have a working SDK, build toolchain, and the corresponding Python / Torch environment preinstalled.
+每个矩阵任务先下载 CUDA SDK 的 `.tar.gz` 包，通过 `tar -xzf` 解压到临时目录，校验包内的 `PPU_SDK/envsetup.sh` 后，用 `mv` 将 `PPU_SDK` 移动到 `/usr/local/`；目标目录已存在时中止。随后将 `${PPU_SDK}/lib` 和 `${CUDA_SDK}/lib64` 追加到 `/etc/ld.so.conf.d/ppu.conf` 并执行 `ldconfig`。这两个环境变量未配置或为空时，分别使用 `/usr/local/PPU_SDK` 和 `/usr/local/PPU_SDK/CUDA_SDK`。
+
+构建步骤再次刷新动态库缓存，加载 `/usr/local/PPU_SDK/envsetup.sh`，再通过本仓库的 PyPI 源安装指定版本的 Torch，最后执行 `build_command`。Torch 版本为空时跳过安装。
+
+基础镜像需要预装编译工具链、对应的 Python/pip，以及 Bash、wget、tar、gzip、mv、cp、ldconfig；安装过程需要写入 `/usr/local` 和 `/etc/ld.so.conf.d` 的权限。SDK 下载、解压、布局校验、动态库初始化或 Torch 安装失败都会中止构建，发布与非发布构建遵循相同规则。
 
 The build command can read:
 
@@ -188,7 +191,7 @@ PYTHON_VERSION  OS_VERSION  RUNTIME_VERSION  TORCH_VERSION  SDK_VERSION
 RELEASE_VERSION  WHL_NAME  CONTAINER_IMAGE
 ```
 
-`TORCH_URL` and `SDK_URL` remain available as environment variable placeholders in the workflow, but their lookup logic is not enabled, so no download URLs are currently available. The "Install SDK and Torch" step is also commented out and cannot be relied on to complete the environment automatically.
+`SDK_URL` 来自矩阵生成的 SDK 下载地址，用于构建前安装。Torch 直接通过 PyPI 按 `TORCH_VERSION` 安装，不再使用 `TORCH_URL`。
 
 The caller's code is checked out with its full Git history and recursive submodules. After the build, the workflow recursively scans the source workspace for regular `.whl` files. If multiple files exist, they are filtered by package name prefix, and exactly one must remain. The selected artifact is collected into `dist/`, which retains only the selected wheel. Avoid leaving multiple artifacts for the same package in the build directory.
 

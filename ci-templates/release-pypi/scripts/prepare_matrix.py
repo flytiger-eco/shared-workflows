@@ -8,8 +8,17 @@ import subprocess
 from packaging.version import InvalidVersion, Version
 
 IMAGES_MAP = {
-    "ubuntu2404-py312-sdk2.2.0-cuda13.0.0-torch2.13.0": "pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.0-2.13.0-ubuntu24.04-cuda13.0-py312-20261001",
-    "ubuntu2404-py312-sdk2.2.0-cuda13.0.0-torch2.10.0": "pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.0-2.10.0-ubuntu24.04-cuda13.0-py312-20261001",
+    "ubuntu2404-py312": "pkg.flytiger-eco.com/docker_tool/ubuntu2404-py312:06",
+    "ubuntu2204-py310": "pkg.flytiger-eco.com/docker_tool/ubuntu2204-py310:05",
+    "ubuntu2004-py38" : "pkg.flytiger-eco.com/docker_tool/ubuntu2004-py38:01",
+    "alios7u2-py312"  : "pkg.flytiger-eco.com/docker_tool/alios7u2-py312:03",
+    "alios7u2-py310"  : "pkg.flytiger-eco.com/docker_tool/alios7u2-py310:08",
+    "alios7u2-py38"   : "pkg.flytiger-eco.com/docker_tool/alios7u2-py38:10",
+}
+
+SDK_MAP = {
+    "2.1.1": "a5c56e",
+    "2.2.0": "663c22",
 }
 
 def fail(message):
@@ -22,23 +31,15 @@ def parse_json(raw, label):
     except (TypeError, ValueError):
         fail(f"{label} 必须是合法 JSON")
 
-
-def get_torch_url(
-    python_version: str,
-    os_version: str,
-    runtime_version: str,
-    torch_version: str,
-    sdk_version: str,
-) -> str:
-    """根据五个版本获取 Torch 下载地址，暂返回空字符串作为占位。"""
-    # TODO: 实现 Torch 下载地址查询逻辑。
-    return ""
+def get_sdk_package_name(sdk_version, runtime_version, os_version):
+    _runtime_version = runtime_version.lower().replace("cuda", "").replace("cu", "")
+    return f"PPU_SDK_cuda-{_runtime_version}-{os_version}-{sdk_version}-{SDK_MAP[sdk_version]}.tar.gz"
 
 
-def get_sdk_url(os_version: str, runtime_version: str, sdk_version: str) -> str:
-    """根据 OS、Runtime 和 SDK 版本获取 SDK 下载地址，暂返回空字符串作为占位。"""
-    # TODO: 实现 SDK 下载地址查询逻辑。
-    return ""
+def get_sdk_url(sdk_version, runtime_version, os_version):
+    sdk_version = sdk_version.lower().replace("v", "")
+    sdk_package_name = get_sdk_package_name(sdk_version, runtime_version, os_version)
+    return f"https://pkg.flytiger-eco.com/artifactory/generic-local/CUDA_SDK/v{sdk_version}/{sdk_package_name}"
 
 
 def get_build_tag(tag_version=""):
@@ -101,9 +102,9 @@ def main():
     candidates = {
         "python_versions": {"38", "310", "312"},
         "os_versions": {"ubuntu2004", "ubuntu2204", "ubuntu2404", "alios7u2"},
-        "runtime_versions": {"12.8.0", "13.0.0", "13.2.0"},
-        "torch_versions": {"", "2.10.0", "2.11.0", "2.13.0"},
-        "sdk_versions": {"2.1.0", "2.2.0"},
+        "runtime_versions": {"12.6.0", "12.8.0", "12.9.0", "13.0.0", "13.2.0"},
+        "torch_versions": {"", "2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0", "2.11.0", "2.13.0"},
+        "sdk_versions": set(SDK_MAP),
     }
     axes = {}
     for name, allowed in candidates.items():
@@ -129,8 +130,8 @@ def main():
     if count > 256:
         fail(f"矩阵包含 {count} 个任务，超过 GitHub Actions 的 256 个任务限制，请缩小版本范围")
 
-    for os_version, python_version, sdk_version, runtime_version, torch_version in itertools.product(axes["os_version"], axes["python_version"], axes["sdk_version"], axes["runtime_version"], axes["torch_version"]):
-        key = f"{os_version}-py{python_version}-sdk{sdk_version}-cuda{runtime_version}-torch{torch_version}"
+    for os_version, python_version in itertools.product(axes["os_version"], axes["python_version"]):
+        key = f"{os_version}-py{python_version}"
         image = IMAGES_MAP.get(key)
         if not isinstance(image, str) or not image or re.search(r"\s", image):
             fail(f"BUILD_CONTAINER_IMAGES 缺少 {key} 或镜像地址为空/包含空白字符")
@@ -140,8 +141,13 @@ def main():
     combinations = []
     for values in itertools.product(*axes.values()):
         entry = dict(zip(axes, values))
-        key = f"{entry['os_version']}-py{entry['python_version']}-sdk{entry['sdk_version']}-cuda{entry['runtime_version']}-torch{entry['torch_version']}"
-        entry["image"] = IMAGES_MAP.get(key)
+        key = f"{entry['os_version']}-py{entry['python_version']}"
+        entry["image"] = IMAGES_MAP[key]
+        entry["sdk_url"] = get_sdk_url(
+            sdk_version=entry["sdk_version"],
+            runtime_version=entry["runtime_version"],
+            os_version=entry["os_version"],
+        )
         # 非发布构建不生成发布版本和目标文件名，保留构建命令产出的原始 wheel。
         entry.update(tag="", release_version="", whl_name="")
         if should_release:
@@ -162,18 +168,6 @@ def main():
                 f"{wheel_package_name}-{wheel_version}+cu{whl_runtime_version}"
                 f"{torch_suffix}{entry['os_version']}oe-{python_tag}-{python_tag}-linux_x86_64.whl"
             )
-        # entry["torch_url"] = get_torch_url(
-        #     python_version=entry["python_version"],
-        #     os_version=entry["os_version"],
-        #     runtime_version=entry["runtime_version"],
-        #     torch_version=entry["torch_version"],
-        #     sdk_version=entry["sdk_version"],
-        # )
-        # entry["sdk_url"] = get_sdk_url(
-        #     os_version=entry["os_version"],
-        #     runtime_version=entry["runtime_version"],
-        #     sdk_version=entry["sdk_version"],
-        # )
         combinations.append(entry)
 
     matrix = json.dumps({"include": combinations}, separators=(",", ":"))
