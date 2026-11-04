@@ -66,7 +66,7 @@ def main():
         if not artifact_dir:
             raise ValueError("ARTIFACT_DIR must not be empty")
         paths = find_wheels(Path(artifact_dir))
-        # 只获取一次上海时间，确保跨分钟上传的所有文件仍使用同一目录。
+        # Read the Shanghai time only once so all files uploaded across a minute boundary still share the same directory.
         timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d-%H%M")
         batch_url = ARTIFACTORY_URL + timestamp + "/"
         username = os.environ.get("RELEASE_USERNAME", "")

@@ -1,4 +1,4 @@
-"""wheel 重命名、重打包与上传的离线测试：模拟 SDK、revpkg 和 curl，不编译或联网。"""
+"""Offline tests for wheel renaming, repacking and upload: mock SDK, revpkg and curl, without compiling or networking."""
 
 import json
 import os
@@ -119,7 +119,7 @@ def workflow():
 @pytest.fixture
 def upload_step(workflow):
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                if step.get("name") == "上传 wheel 到 Artifactory")
+                if step.get("name") == "Upload wheel to Artifactory")
 
 
 @pytest.fixture
@@ -133,7 +133,7 @@ def workspace():
 @pytest.fixture
 def build_step(workflow):
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                if step.get("name") == "编译")
+                if step.get("name") == "Build")
 
 
 @pytest.fixture
@@ -147,13 +147,13 @@ def build_env(workspace, install_nccl_step):
 @pytest.fixture
 def install_sdk_step(workflow):
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                if step.get("name") == "下载并安装 CUDA SDK")
+                if step.get("name") == "Download and install CUDA SDK")
 
 
 @pytest.fixture
 def install_nccl_step(workflow):
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                if step.get("name") == "下载并安装 NCCL")
+                if step.get("name") == "Download and install NCCL")
 
 
 @pytest.fixture
@@ -170,7 +170,7 @@ def run_nccl_install(install_nccl_step, build_step, workspace, build_env):
         env.update(step_env)
         env.update(overrides)
         env = {key: value for key, value in env.items() if value is not None}
-        # 系统路径隔离到工作区；网络和 ldconfig 使用替身，真实执行 tar/mv。
+        # Isolate system paths into the workspace; use stubs for network and ldconfig, execute tar/mv for real.
         script = install_nccl_step["run"].replace("/etc/ld.so.conf.d/nccl.conf", str(workspace / "nccl.conf"))
         shim = r'''
 wget() {
@@ -223,7 +223,7 @@ mv() {
         result = subprocess.run(["bash"], input=BUILD_SHIM + shim + script, cwd=workspace, env=env,
                                 text=True, capture_output=True, timeout=30)
         if result.returncode == 0:
-            # 模拟 Actions 的独立 step，仅从 GITHUB_ENV 继承安装步骤导出的变量。
+            # Simulate Actions' separate steps, inheriting only the variables exported by the install step via GITHUB_ENV.
             next_env = {key: value for key, value in env.items() if key not in step_env}
             next_env.update(dict(line.split("=", 1) for line in (workspace / "github-env").read_text().splitlines()))
             next_env["TEST_PHASE"] = "build"
@@ -242,7 +242,7 @@ def run_sdk_install(install_sdk_step, build_step, workspace, build_env):
                    BUILD_COMMAND='test "$SDK_READY" = yes; printf "build\\n" >> "$RUNNER_TEMP/events"')
         env.update(overrides)
         env = {key: value for key, value in env.items() if value is not None}
-        # 安装目标隔离到工作区，保留真实 tar/mv 执行，下载与系统命令使用替身。
+        # Isolate the install target into the workspace, keep real tar/mv execution, and use stubs for downloads and system commands.
         local = workspace / "local"
         local.mkdir(exist_ok=True)
         script = install_sdk_step["run"].replace("/usr/local/", str(local) + "/")
@@ -319,7 +319,7 @@ def run_build(build_step, workspace, build_env):
         env.update(overrides)
         env.pop("WHL_NAME", None)
         env = {key: value for key, value in env.items() if value is not None}
-        # 模拟 SDK 初始化及 Torch 安装，保留构建命令生成的原始文件名。
+        # Simulate SDK initialization and Torch installation, preserving the original file names produced by the build command.
         return subprocess.run(["bash"], input=BUILD_SHIM + build_step["run"], cwd=workspace,
                               env=env, text=True, capture_output=True, timeout=30)
 
@@ -329,7 +329,7 @@ def run_build(build_step, workspace, build_env):
 @pytest.fixture
 def collect_step(workflow):
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                if step.get("name") == "收集 wheel 到 dist")
+                if step.get("name") == "Collect wheels into dist")
 
 
 @pytest.fixture
@@ -356,7 +356,7 @@ def repack_step(workflow):
 @pytest.fixture
 def rename_step(workflow):
     return next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                if step.get("name") == "重命名 wheel")
+                if step.get("name") == "Rename wheel")
 
 
 @pytest.fixture
@@ -386,7 +386,7 @@ def run_repack(repack_step, workspace):
         env = {key: value for key, value in env.items() if value is not None}
         args = shlex.split(repack_step["with"]["args"])
         assert args[:-1] == ["-euo", "pipefail", "-c"]
-        # 仅将容器内临时路径映射到隔离目录；真实执行步骤的参数解析、cp 和输出校验。
+        # Only map the container's temporary path to the isolated directory; execute the step's argument parsing, cp and output validation for real.
         script = args[-1].replace("/tmp/origin", str(workspace / "origin"))
         script = script.replace("/tmp/release", str(workspace / "release"))
         result = subprocess.run([repack_step["with"]["entrypoint"], *args[:-1], REVPKG_SHIM + script],
@@ -420,7 +420,7 @@ def run_upload(upload_step, workspace):
 @pytest.fixture
 def run_release_data(workflow, workspace):
     step = next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                if step["name"] == "生成发布数据 JSON")
+                if step["name"] == "Generate release data JSON")
 
     def run(matrix=None, package_name="demo_package", index="0", **overrides):
         if matrix is None:
@@ -446,9 +446,9 @@ def test_upload_follows_rename_and_credentials_are_step_scoped(
     job = workflow["jobs"]["matrix-job"]
     steps = job["steps"]
     index = steps.index(repack_step)
-    assert steps[index - 3]["name"] == "编译"
+    assert steps[index - 3]["name"] == "Build"
     assert steps[index - 2] is collect_step
-    assert steps[index - 1]["name"] == "保存收集的 wheel 产物"
+    assert steps[index - 1]["name"] == "Upload collected wheel artifacts"
     assert collect_step["shell"] == "bash"
     assert collect_step["env"] == {"PACKAGE_NAME": "${{ needs.prepare-matrix.outputs.package_name }}"}
     assert "if" not in collect_step
@@ -463,7 +463,7 @@ def test_upload_follows_rename_and_credentials_are_step_scoped(
     assert repack_step["if"] == "${{ needs.prepare-matrix.outputs.should_release == 'true' }}"
     assert "continue-on-error" not in repack_step
     assert "${{" not in repack_step["with"]["args"]
-    assert upload_step["name"] == "上传 wheel 到 Artifactory"
+    assert upload_step["name"] == "Upload wheel to Artifactory"
     assert upload_step["shell"] == "bash"
     assert upload_step["if"] == "${{ needs.prepare-matrix.outputs.should_release == 'true' }}"
     assert "continue-on-error" not in upload_step
@@ -510,7 +510,7 @@ def test_collected_artifact_precedes_all_release_only_steps(workflow, collect_st
     steps = workflow["jobs"]["matrix-job"]["steps"]
     index = steps.index(collect_step) + 1
     artifact = steps[index]
-    assert artifact["name"] == "保存收集的 wheel 产物"
+    assert artifact["name"] == "Upload collected wheel artifacts"
     assert artifact["uses"] == "actions/upload-artifact@v4"
     assert artifact["with"] == {
         "name": "${{ needs.prepare-matrix.outputs.package_name }}-collected-wheels-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}",
@@ -523,11 +523,11 @@ def test_collected_artifact_precedes_all_release_only_steps(workflow, collect_st
         assert "secrets." not in str(step)
     release_gate = "needs.prepare-matrix.outputs.should_release == 'true'"
     for step in steps[index + 1:]:
-        if step["name"] == "保存 GitHub Release wheel 产物":
+        if step["name"] == "Upload GitHub Release wheel artifacts":
             assert step["if"] == "${{ " + release_gate + " && (inputs.tag_version != '' || github.ref_type == 'tag') }}"
         else:
             assert step["if"] == "${{ " + release_gate + " }}"
-        # 不使用 always() 等状态函数，保留默认 success()，防止前序失败后继续发布。
+        # Do not use state functions like always(); keep the default success() to prevent continuing the release after a prior failure.
         assert "continue-on-error" not in step
 
 
@@ -555,7 +555,7 @@ def test_authenticated_upload_uses_release_version_and_encodes_segments(run_uplo
     assert "--verbose" not in args
     assert "test-release-user" not in result.stdout + result.stderr
     assert "test-release-token" not in result.stdout + result.stderr
-    assert "已上传 " + WHEEL_NAME in result.stdout
+    assert "Uploaded " + WHEEL_NAME in result.stdout
 
 
 @pytest.mark.parametrize("version", [
@@ -584,7 +584,7 @@ def test_optional_build_tag_and_python_tag_do_not_change_release_directory(run_u
 def test_multiple_wheels_cannot_share_one_expected_name(run_upload):
     result, calls = run_upload((WHEEL_NAME, RENAMED_WHEEL))
     assert result.returncode != 0
-    assert "上传 wheel 文件名与 WHL_NAME 不一致" in result.stderr
+    assert "the uploaded wheel file name does not match WHL_NAME" in result.stderr
     assert calls == []
 
 
@@ -598,7 +598,7 @@ def test_no_wheel_fails_without_uploading_other_artifacts(workspace, run_upload)
     (workspace / "dist/source.tar.gz").write_bytes(b"not a wheel")
     result, calls = run_upload(())
     assert result.returncode != 0
-    assert "::error::dist 目录中未找到 wheel 文件" in result.stderr
+    assert "::error::no wheel file found in the dist directory" in result.stderr
     assert calls == []
 
 
@@ -626,7 +626,7 @@ def test_invalid_wheel_names_fail_before_network(run_upload, filename):
 def test_all_paths_are_validated_before_first_upload(run_upload):
     result, calls = run_upload((WHEEL_NAME, "zzz_other-1.2.3-py3-none-any.whl"))
     assert result.returncode != 0
-    assert "包名与 package_name 不一致" in result.stderr
+    assert "the wheel package name does not match package_name" in result.stderr
     assert calls == []
 
 
@@ -648,7 +648,7 @@ def test_non_regular_wheels_are_rejected(workspace, run_upload, kind):
         path.mkdir()
     result, calls = run_upload(())
     assert result.returncode != 0
-    assert "上传产物必须是普通 wheel 文件" in result.stderr
+    assert "upload artifacts must be regular wheel files" in result.stderr
     assert calls == []
 
 
@@ -656,9 +656,9 @@ def test_non_regular_wheels_are_rejected(workspace, run_upload, kind):
 def test_non_success_status_stops_uploads(run_upload, status):
     result, calls = run_upload(TEST_HTTP_STATUS=status)
     assert result.returncode != 0
-    assert "HTTP 状态码：" + status in result.stderr
+    assert "upload failed with HTTP status: " + status in result.stderr
     assert len(calls) == 1
-    assert "已上传" not in result.stdout
+    assert "Uploaded" not in result.stdout
 
 
 @pytest.mark.parametrize("exit_code", ["7", "22", "28"])
@@ -666,7 +666,7 @@ def test_curl_failure_propagates(run_upload, exit_code):
     result, calls = run_upload(TEST_CURL_EXIT=exit_code, TEST_HTTP_STATUS="000")
     assert result.returncode == int(exit_code)
     assert len(calls) == 1
-    assert "已上传" not in result.stdout
+    assert "Uploaded" not in result.stdout
 
 
 def test_sdk_install_precedes_build_for_all_matrix_jobs(workflow, install_sdk_step, install_nccl_step, build_step):
@@ -775,7 +775,7 @@ def test_existing_nccl_target_is_preserved(run_nccl_install, workspace, kind):
         target.symlink_to(workspace / "missing")
     result, events = run_nccl_install()
     assert result.returncode != 0
-    assert "NCCL 安装目录已存在" in result.stderr
+    assert "the NCCL installation directory already exists" in result.stderr
     assert events == ["nccl-download"]
     assert not (workspace / "github-env").exists()
     if kind == "directory":
@@ -852,7 +852,7 @@ def test_existing_sdk_target_prevents_nested_move(run_sdk_install, workspace, ki
         target.symlink_to(workspace / "missing")
     result, events = run_sdk_install()
     assert result.returncode != 0
-    assert "SDK 安装目录已存在" in result.stderr
+    assert "the SDK installation directory already exists" in result.stderr
     assert events == ["download"]
     assert not (workspace / "ppu.conf").exists()
     if kind == "directory":
@@ -878,7 +878,7 @@ def test_sdk_download_failure_prevents_install_and_build(run_sdk_install, exit_c
 
 
 @pytest.mark.parametrize("mode,error", [
-    ("empty", "SDK 压缩包为空"), ("corrupt", ""), ("missing", "PPU_SDK/envsetup.sh"),
+    ("empty", "downloaded SDK archive is empty"), ("corrupt", ""), ("missing", "PPU_SDK/envsetup.sh"),
 ])
 def test_invalid_sdk_archive_prevents_install_and_build(run_sdk_install, workspace, mode, error):
     result, events = run_sdk_install(TEST_ARCHIVE_MODE=mode)
@@ -968,7 +968,7 @@ def test_rename_wheel_without_changing_bytes(run_rename, workspace):
     assert not (workspace / "dist" / WHEEL_NAME).exists()
     assert (workspace / "dist" / RENAMED_WHEEL).read_bytes() == b"test wheel data"
     assert archive.read_bytes() == b"source archive"
-    assert f"wheel 产物：dist/{RENAMED_WHEEL}" in result.stdout
+    assert f"Wheel artifact: dist/{RENAMED_WHEEL}" in result.stdout
 
 
 def test_repacked_wheel_is_uploaded_under_release_version(
@@ -979,8 +979,8 @@ def test_repacked_wheel_is_uploaded_under_release_version(
     result = run_collect()
     assert result.returncode == 0, result.stderr
     artifact = next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                    if step["name"] == "保存收集的 wheel 产物")
-    # 模拟 Actions 上传时读取文件，随后 Repack 不影响已保存的原始字节。
+                    if step["name"] == "Upload collected wheel artifacts")
+    # Simulate Actions reading files during upload, so a later Repack does not affect the already-saved original bytes.
     saved = {path.name: path.read_bytes() for path in workspace.glob(artifact["with"]["path"])}
     assert saved == {WHEEL_NAME: b"test wheel data"}
     result, _ = run_repack()
@@ -1062,24 +1062,24 @@ def test_nonrelease_matrix_build_stops_after_original_wheel_artifact(
     executed, artifacts = [], {}
     successful = True
     steps = jobs["matrix-job"]["steps"]
-    start = next(i for i, step in enumerate(steps) if step["name"] == "编译")
+    start = next(i for i, step in enumerate(steps) if step["name"] == "Build")
     for step in steps[start:]:
-        # 模拟默认 success() 与 YAML if；编译和收集执行真实脚本，仅 artifact 上传使用内存快照。
+        # Simulate the default success() and YAML if; Build and Collect run real scripts, only artifact upload uses an in-memory snapshot.
         if not successful or not allows(step.get("if", "True")):
             continue
         executed.append(step["name"])
-        if step["name"] == "编译":
+        if step["name"] == "Build":
             result = run_build(build_command=command, RELEASE_VERSION=entry["release_version"],
                                TORCH_VERSION=entry["torch_version"])
             successful = result.returncode == 0
-        elif step["name"] == "收集 wheel 到 dist":
+        elif step["name"] == "Collect wheels into dist":
             result = run_collect()
             successful = result.returncode == 0
-        elif step["name"] == "保存收集的 wheel 产物":
+        elif step["name"] == "Upload collected wheel artifacts":
             artifacts = {path.name: path.read_bytes() for path in workspace.glob(step["with"]["path"])}
         else:
-            pytest.fail(f"非发布构建不应执行：{step['name']}")
-    expected = ["编译", "收集 wheel 到 dist", "保存收集的 wheel 产物"]
+            pytest.fail(f"non-release build should not run: {step['name']}")
+    expected = ["Build", "Collect wheels into dist", "Upload collected wheel artifacts"]
     assert executed == (expected if failure is None else expected[:1 if failure == "build" else 2])
     assert artifacts == ({WHEEL_NAME: b"test wheel data"} if failure is None else {})
     assert not (workspace / "release-data").exists()
@@ -1191,7 +1191,7 @@ def test_collect_single_wheel_keeps_original_name_and_bytes(run_collect, workspa
     assert (workspace / source).read_bytes() == b"test wheel data"
     assert (workspace / "dist" / WHEEL_NAME).read_bytes() == b"test wheel data"
     assert list((workspace / "dist").iterdir()) == [workspace / "dist" / WHEEL_NAME]
-    assert "已收集 wheel：" in result.stdout
+    assert "Collected wheel: " in result.stdout
 
 
 def test_collect_creates_missing_dist(run_collect, workspace):
@@ -1228,12 +1228,12 @@ def test_collect_multiple_filters_normalized_prefix_and_keeps_only_selected_in_d
 
 
 @pytest.mark.parametrize("filenames,error", [
-    ((), "未找到 .whl 文件"),
-    (("vendor/other.whl", "dist/dependency.whl"), "实际为 0 个"),
-    (("build/" + WHEEL_NAME, "other/" + WHEEL_NAME), "实际为 2 个"),
-    (("build/" + WHEEL_NAME, "dist/" + WHEEL_NAME), "实际为 2 个"),
-    (("build/" + WHEEL_NAME, "dist/Demo-Package-2.0.0-py3-none-any.whl"), "实际为 2 个"),
-    (("build/demo.package-1.0.0-py3-none-any.whl", "dist/dependency.whl"), "实际为 0 个"),
+    ((), "no .whl file found"),
+    (("vendor/other.whl", "dist/dependency.whl"), "got 0"),
+    (("build/" + WHEEL_NAME, "other/" + WHEEL_NAME), "got 2"),
+    (("build/" + WHEEL_NAME, "dist/" + WHEEL_NAME), "got 2"),
+    (("build/" + WHEEL_NAME, "dist/Demo-Package-2.0.0-py3-none-any.whl"), "got 2"),
+    (("build/demo.package-1.0.0-py3-none-any.whl", "dist/dependency.whl"), "got 0"),
 ])
 def test_collect_missing_or_ambiguous_wheels_fails_before_changes(run_collect, workspace, filenames, error):
     archive = workspace / "dist/source.tar.gz"
@@ -1241,7 +1241,7 @@ def test_collect_missing_or_ambiguous_wheels_fails_before_changes(run_collect, w
     result = run_collect(filenames)
     assert result.returncode != 0
     assert error in result.stderr
-    assert "已收集 wheel" not in result.stdout
+    assert "Collected wheel" not in result.stdout
     for filename in filenames:
         assert filename in result.stdout
         assert (workspace / filename).read_bytes() == b"test wheel data"
@@ -1261,7 +1261,7 @@ def test_collect_does_not_follow_symlinks_or_treat_directories_as_wheels(run_col
     result = run_collect()
     assert result.returncode == 0, result.stderr
     assert (workspace / "dist" / WHEEL_NAME).read_bytes() == b"test wheel data"
-    assert json.loads(result.stdout.splitlines()[0].split("：", 1)[1]) == ["build/" + WHEEL_NAME]
+    assert json.loads(result.stdout.splitlines()[0].split(": ", 1)[1]) == ["build/" + WHEEL_NAME]
 
 
 @pytest.mark.parametrize("kind", ["directory", "symlink", "broken_symlink"])
@@ -1276,7 +1276,7 @@ def test_collect_rejects_non_regular_dist_wheels_before_copying(run_collect, wor
         invalid.symlink_to(target)
     result = run_collect(("build/" + WHEEL_NAME,))
     assert result.returncode != 0
-    assert "dist 中的 wheel 必须是普通文件" in result.stderr
+    assert "wheels in dist must be regular files" in result.stderr
     assert not (workspace / "dist" / WHEEL_NAME).exists()
     assert (workspace / "build" / WHEEL_NAME).read_bytes() == b"test wheel data"
     if kind == "symlink":
@@ -1294,7 +1294,7 @@ def test_collect_rejects_invalid_dist_directory(run_collect, workspace, kind):
         dist.symlink_to(unused if kind == "symlink" else workspace / "missing", target_is_directory=True)
     result = run_collect(("build/" + WHEEL_NAME,))
     assert result.returncode != 0
-    assert "dist 必须是普通目录" in result.stderr
+    assert "dist must be a regular directory" in result.stderr
     assert list(unused.iterdir()) == []
     assert (workspace / "build" / WHEEL_NAME).read_bytes() == b"test wheel data"
 
@@ -1302,7 +1302,7 @@ def test_collect_rejects_invalid_dist_directory(run_collect, workspace, kind):
 def test_collect_rejects_empty_package_name(run_collect, workspace):
     result = run_collect(("build/" + WHEEL_NAME,), package_name="")
     assert result.returncode != 0
-    assert "package_name 不能为空" in result.stderr
+    assert "package_name must not be empty" in result.stderr
     assert list((workspace / "dist").iterdir()) == []
 
 
@@ -1342,7 +1342,7 @@ def test_repack_failure_preserves_original_and_propagates(run_build, run_repack,
     assert result.returncode == exit_code
     assert len(calls) == 1
     assert (workspace / "dist" / WHEEL_NAME).read_bytes() == b"test wheel data"
-    assert "已重打包" not in result.stdout
+    assert "Repacked wheel" not in result.stdout
 
 
 @pytest.mark.parametrize("mode", ["missing", "multiple", "symlink", "directory", "empty"])
@@ -1351,10 +1351,11 @@ def test_invalid_repack_output_preserves_original(run_build, run_repack, workspa
     assert result.returncode == 0, result.stderr
     result, calls = run_repack(TEST_REPACK_MODE=mode)
     assert result.returncode != 0
-    assert "::error::重打包" in result.stderr
+    assert ("::error::repacking must produce" in result.stderr
+            or "::error::the repacked artifact" in result.stderr)
     assert len(calls) == 1
     assert (workspace / "dist" / WHEEL_NAME).read_bytes() == b"test wheel data"
-    assert "已重打包" not in result.stdout
+    assert "Repacked wheel" not in result.stdout
 
 
 def test_stale_repack_output_is_rejected(run_build, run_repack, workspace):
@@ -1364,7 +1365,7 @@ def test_stale_repack_output_is_rejected(run_build, run_repack, workspace):
     (workspace / "release" / WHEEL_NAME).write_bytes(b"stale wheel")
     result, calls = run_repack()
     assert result.returncode != 0
-    assert "重打包输出目录已存在 wheel 文件" in result.stderr
+    assert "wheel files already exist in the repack output directory" in result.stderr
     assert calls == []
     assert (workspace / "dist" / WHEEL_NAME).read_bytes() == b"test wheel data"
 
@@ -1375,7 +1376,7 @@ def test_repack_requires_exactly_one_input(run_repack, workspace, filenames):
         (workspace / "dist" / name).write_bytes(b"test wheel data")
     result, calls = run_repack()
     assert result.returncode != 0
-    assert "重打包前 dist 目录必须包含且仅包含一个 wheel 文件" in result.stderr
+    assert "the dist directory must contain exactly one wheel file before repacking" in result.stderr
     assert calls == []
 
 
@@ -1390,7 +1391,7 @@ def test_repack_rejects_invalid_input(run_repack, workspace, kind):
         wheel.mkdir()
     result, calls = run_repack()
     assert result.returncode != 0
-    assert "待重打包的 wheel 必须是普通文件" in result.stderr
+    assert "the wheel to repack must be a regular file" in result.stderr
     assert calls == []
 
 
@@ -1416,7 +1417,7 @@ def test_already_named_wheel_is_kept(run_rename, workspace):
 def test_rename_requires_exactly_one_wheel(run_rename, workspace, filenames):
     result = run_rename(filenames=filenames)
     assert result.returncode != 0
-    assert "必须包含且仅包含一个 wheel 文件" in result.stderr
+    assert "must contain exactly one wheel file" in result.stderr
     assert not (workspace / "dist" / RENAMED_WHEEL).exists()
     for name in filenames:
         assert (workspace / "dist" / name).read_bytes() == b"test wheel data"
@@ -1445,7 +1446,7 @@ def test_non_regular_source_cannot_be_renamed(run_rename, workspace, kind):
         source.symlink_to(target)
     result = run_rename(filenames=())
     assert result.returncode != 0
-    assert "待重命名的 wheel 必须是普通文件" in result.stderr
+    assert "the wheel to rename must be a regular file" in result.stderr
     assert not (workspace / "dist" / RENAMED_WHEEL).exists()
     if kind == "symlink":
         assert target.read_bytes() == b"unrelated data"
@@ -1477,7 +1478,7 @@ def test_failed_build_does_not_rename_output(run_build, workspace):
     assert result.returncode == 7
     assert (workspace / "dist" / WHEEL_NAME).read_bytes() == b"partial build"
     assert not (workspace / "dist" / RENAMED_WHEEL).exists()
-    assert "wheel 产物" not in result.stdout
+    assert "Wheel artifact" not in result.stdout
 
 
 def test_build_collect_and_rename_shell_syntax(build_step, collect_step, rename_step):
@@ -1567,7 +1568,7 @@ def test_release_json_filenames_do_not_collide_when_artifacts_are_merged(run_rel
 def test_release_json_rejects_invalid_file_index(run_release_data, workspace, index):
     result = run_release_data(index=index)
     assert result.returncode != 0
-    assert "矩阵索引必须是非负整数" in result.stderr
+    assert "the matrix index must be a non-negative integer" in result.stderr
     assert not (workspace / "release-data").exists()
 
 
@@ -1592,6 +1593,6 @@ def test_release_json_without_code_tag_fails_instead_of_using_branch_name(run_re
 
 def test_release_json_shell_syntax(workflow):
     step = next(step for step in workflow["jobs"]["matrix-job"]["steps"]
-                if step["name"] == "生成发布数据 JSON")
+                if step["name"] == "Generate release data JSON")
     result = subprocess.run(["bash", "-n"], input=step["run"], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
