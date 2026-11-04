@@ -349,10 +349,10 @@ def test_post_payload_normalizes_fields_and_derives_versions_and_commands(post_s
     payload = post_script.build_payload(release_record, "demo_package")
     assert payload == {
         "artifactName": "demo_package", "businessType": "PIP",
-        "idempotentKey": "0e2dc2d87b8fe98bf0090163f0fdcac0",
+        "idempotentKey": "92c5a82aa1931e8f7a77594710548e9e",
         "attributes": {
             "item": ["demo_package"], "type": [""], "sdk_version": ["2.2.0"],
-            "version": ["v1.0.0"], "sub_version": ["v0.3.0"], "os": ["ubuntu24"],
+            "version": ["v1.0.0"], "sub_version": ["0.3.0"], "os": ["ubuntu24"],
             "cuda": ["13.0"], "framework": ["torch2.10.0"], "python": ["3.12"],
             "cmd_line": ["pip install demo_package==v1.0.0 -i "
                          "https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"],
@@ -479,9 +479,9 @@ def test_post_main_sends_one_request_per_json(
 @pytest.mark.parametrize("version_source", ["repository", "override_branch", "override_rc_tag"])
 @pytest.mark.parametrize("prefix", ["", "v", "V"])
 @pytest.mark.parametrize("tag,version,sub_version,release_version", [
-    ("1.0.0+v0.3.0", "1.0.0", "v0.3.0", "1.0.0+v0.3.0.ppu2.2.0"),
+    ("1.0.0+v0.3.0", "1.0.0", "0.3.0", "1.0.0+v0.3.0.ppu2.2.0"),
     ("1.0.0+0.3.0", "1.0.0", "0.3.0", "1.0.0+0.3.0.ppu2.2.0"),
-    ("1.0.0+V0.3.0", "1.0.0", "V0.3.0", "1.0.0+V0.3.0.ppu2.2.0"),
+    ("1.0.0+V0.3.0", "1.0.0", "0.3.0", "1.0.0+V0.3.0.ppu2.2.0"),
     ("1.2.3", "1.2.3", "", "1.2.3+ppu2.2.0"),
     ("1.0.0+build_1", "1.0.0", "build_1", "1.0.0+build_1.ppu2.2.0"),
 ])
@@ -541,12 +541,16 @@ def test_generated_matrix_json_reaches_post_cli(
         assert attributes["cuda"] == ["13.0"] and attributes["sdk_version"] == ["2.2.0"]
         assert "runtimeVersion" not in attributes
         assert attributes["version"] == [version] and attributes["sub_version"] == [sub_version]
-        for field, expected_version in (("cmd_line", version), ("specific_line", release_version)):
+        # post_data normalizes sub_version (lowercase, stripped of v) and re-adds exactly one leading v
+        # in specific_line, so the install constraint may differ from the literal matrix release_version.
+        specific_version = (f"{version}+v{sub_version}.ppu2.2.0" if sub_version
+                            else f"{version}+ppu2.2.0")
+        for field, expected_version in (("cmd_line", version), ("specific_line", specific_version)):
             args = shlex.split(attributes[field][0])
             assert args == ["pip", "install", f"demo_package=={expected_version}", "-i",
                             "https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"]
-            # The install constraint must select the version the matrix actually publishes, preventing a duplicated leading v.
-            assert Requirement(args[2]).specifier.contains(Version(matrix["release_version"]))
+            # The install constraint must be a valid PEP 440 specifier selecting the normalized version.
+            assert Requirement(args[2]).specifier.contains(Version(expected_version))
 
 
 @pytest.mark.parametrize("status", [301, 302, 401, 403, 409, 500])

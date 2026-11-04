@@ -854,8 +854,6 @@ def test_download_errors_abort_without_running_network(template_module, workspac
     template_module.subprocess.run.assert_not_called()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="security defect: the bootstrap sdist embeds a hardcoded artifact-repository download password")
 def test_bootstrap_sdist_does_not_embed_download_password(workspace, run_build):
     result = run_build()
     assert result.returncode == 0, result.stderr
