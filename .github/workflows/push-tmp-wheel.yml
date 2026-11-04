@@ -18,7 +18,7 @@ on:
         type: string
     outputs:
       upload_url:
-        description: 'Batch directory URL for all uploaded .whl files, using one UTC timestamp in YYYY-MM-DD-HHmm format'
+        description: 'Batch directory URL for all uploaded .whl files, using one Asia/Shanghai (UTC+08:00) timestamp in YYYY-MM-DD-HHmm format'
         value: ${{ jobs.push-wheel.outputs.upload_url }}
     secrets:
       template_token:

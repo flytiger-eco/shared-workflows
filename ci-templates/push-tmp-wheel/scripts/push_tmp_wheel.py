@@ -1,6 +1,7 @@
 """Upload all artifact .whl files unchanged into one timestamped temporary directory."""
 
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import os
 from pathlib import Path
 import re
@@ -65,8 +66,8 @@ def main():
         if not artifact_dir:
             raise ValueError("ARTIFACT_DIR must not be empty")
         paths = find_wheels(Path(artifact_dir))
-        # Capture UTC once so every file uses the same directory, even across minute boundaries.
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M")
+        # Read the Shanghai time only once so all files uploaded across a minute boundary still share the same directory.
+        timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d-%H%M")
         batch_url = ARTIFACTORY_URL + timestamp + "/"
         username = os.environ.get("RELEASE_USERNAME", "")
         token = os.environ.get("RELEASE_TOKEN", "")

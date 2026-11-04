@@ -1,4 +1,4 @@
-"""源码包及安装模板的离线测试：验证打包、版本读取和运行时匹配，不编译或下载。"""
+"""Offline tests for the sdist and install template: verify packaging, version reading, and runtime matching without compiling or downloading."""
 
 import ast
 from email.parser import Parser
@@ -25,7 +25,7 @@ CI_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = CI_ROOT.parents[1] / ".github/workflows/matrix-release.yml"
 SETUP_TEMPLATE = CI_ROOT / "scripts/setup.py"
 
-# tag 读取及源码包构建均使用真实代码；执行 setup.py 前断言 FAKE_WHEEL，防止下载。
+# Both tag reading and sdist building use real code; assert FAKE_WHEEL before running setup.py to prevent downloads.
 PYTHON_SHIM = r'''
 python() {
   if [[ "${1:-}" == "setup.py" ]]; then
@@ -40,24 +40,24 @@ python() {
 
 @pytest.fixture
 def workflow():
-    # BaseLoader 保留 GitHub Actions 的 on 键，不按 YAML 1.1 转换为布尔值。
+    # BaseLoader keeps GitHub Actions' "on" key instead of converting it to a boolean per YAML 1.1.
     return yaml.load(WORKFLOW_PATH.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
 @pytest.fixture
 def build_step(workflow):
     return next(step for step in workflow["jobs"]["build-sdist"]["steps"]
-                if step.get("name") == "填充模板并构建源码包")
+                if step.get("name") == "Fill template and build sdist")
 
 
 @pytest.fixture
 def workspace():
-    # 临时构建只写入工作区，测试结束后自动清理。
+    # The temporary build writes only into the workspace and is cleaned up automatically after the test.
     with tempfile.TemporaryDirectory(prefix=".sdist-test-", dir=CI_ROOT) as directory:
         root = Path(directory)
         source = root / "source"
         source.mkdir()
-        (source / "setup.py").write_text("# 调用方原始构建脚本\n", encoding="utf-8")
+        (source / "setup.py").write_text("# caller original build script\n", encoding="utf-8")
         template = root / "ci-template/ci-templates/release-pypi/scripts/setup.py"
         template.parent.mkdir(parents=True)
         template.write_bytes(SETUP_TEMPLATE.read_bytes())
@@ -142,7 +142,7 @@ def test_sdist_shell_syntax(workflow):
 def test_builds_sdist_with_rendered_metadata(workspace, run_build, version, framework, expected_version):
     result = run_build(version=version, framework=framework)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (workspace / "source/setup.py").read_text() == "# 调用方原始构建脚本\n"
+    assert (workspace / "source/setup.py").read_text() == "# caller original build script\n"
     assert (workspace / "ci-template/ci-templates/release-pypi/scripts/setup.py").read_bytes() == SETUP_TEMPLATE.read_bytes()
 
     rendered = (workspace / "sdist/builds" / version / "setup.py").read_text(encoding="utf-8")
@@ -216,7 +216,7 @@ def test_missing_placeholder_fails(workspace, run_build, field):
     template.write_text(template.read_text().replace(f'{field} = ""', f'{field} = "changed"'), encoding="utf-8")
     result = run_build()
     assert result.returncode != 0
-    assert "::error::源码包模板缺少预期占位字段" in result.stderr
+    assert "::error::the sdist template is missing an expected placeholder field" in result.stderr
     assert not (workspace / "sdist").exists()
 
 
@@ -285,7 +285,7 @@ def tag_repository(workspace, monkeypatch):
     for directory in ("source", "ci-template"):
         git("init", "--quiet", directory=directory)
         git("add", ".", directory=directory)
-        git("commit", "--quiet", "-m", "初始化测试仓库", directory=directory)
+        git("commit", "--quiet", "-m", "init test repository", directory=directory)
     git("tag", "9.9.9", directory="ci-template")
     return git
 
@@ -296,10 +296,10 @@ def test_branch_sdist_uses_matrix_release_version(
     workspace, run_build, tag_repository, generate_matrix, annotated, prefix
 ):
     tag_repository("tag", "0.9.0")
-    tag_repository("commit", "--allow-empty", "--quiet", "-m", "待发布提交")
+    tag_repository("commit", "--allow-empty", "--quiet", "-m", "pending release commit")
     tag = prefix + "1.0.0+v0.3.0"
     if annotated:
-        tag_repository("tag", "-a", tag, "-m", "版本 tag")
+        tag_repository("tag", "-a", tag, "-m", "version tag")
     else:
         tag_repository("tag", tag)
     matrix = generate_matrix(GITHUB_REF_TYPE="branch", GITHUB_REF_NAME="main")
@@ -311,14 +311,14 @@ def test_branch_sdist_uses_matrix_release_version(
     assert f'build_version = "{release_version}"' in rendered.read_text()
     archives = list((workspace / "sdist/dist").glob("*.tar.gz"))
     assert [path.name for path in archives] == [f"demo_package-{release_version}.tar.gz"]
-    assert result.stdout.count("已构建源码包版本：") == 1
+    assert result.stdout.count("Built sdist version: ") == 1
 
 
 @pytest.mark.parametrize("prefix", ["", "v", "V"])
 def test_tag_sdist_uses_prepared_release_version(workspace, run_build, tag_repository, generate_matrix, prefix):
     tag = prefix + "1.0.0+v0.3.0"
     tag_repository("tag", tag)
-    tag_repository("tag", "-a", "2.0.0", "-m", "同提交的其他 tag")
+    tag_repository("tag", "-a", "2.0.0", "-m", "another tag on the same commit")
     matrix = generate_matrix(GITHUB_REF_NAME=tag)
     result = run_build(MATRIX_JSON=matrix)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -334,7 +334,7 @@ def test_tag_sdist_uses_prepared_release_version(workspace, run_build, tag_repos
 def test_tag_version_drives_sdist_build_and_publication(
     workflow, workspace, generate_matrix, run_build, tag_version, release_version, prefix
 ):
-    # source 目录没有 Git 仓库；覆盖版本不依赖 tag 存在，两个 Torch 矩阵只构建一个源码包。
+    # The source directory has no Git repository; the override version does not depend on a tag existing, and two Torch matrices build only one sdist.
     matrix = generate_matrix(tag_version=prefix + tag_version, GITHUB_REF_TYPE="branch", GITHUB_REF_NAME="main")
     entries = json.loads(matrix)["include"]
     assert len(entries) == 2
@@ -342,7 +342,7 @@ def test_tag_version_drives_sdist_build_and_publication(
     assert {entry["release_version"] for entry in entries} == {release_version}
     result = run_build(MATRIX_JSON=matrix)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.count("已构建源码包版本：") == 1
+    assert result.stdout.count("Built sdist version: ") == 1
     archives = list((workspace / "sdist/dist").glob("*.tar.gz"))
     assert len(archives) == 1
     archive_path = archives[0]
@@ -388,7 +388,7 @@ def test_later_sdist_failure_stops_remaining_versions(workspace, run_build):
     versions = ["1.2.3+ppu2.1.0", "1.2.3+ppu2.2.0", "1.2.4+ppu2.2.0"]
     result = run_build(versions=versions, TEST_SDIST_FAIL_VERSION=versions[1])
     assert result.returncode == 23
-    assert result.stdout.count("已构建源码包版本：") == 1
+    assert result.stdout.count("Built sdist version: ") == 1
     assert not (workspace / "sdist/builds" / versions[2]).exists()
     assert [p.name for p in (workspace / "sdist/dist").glob("*.tar.gz")] == [
         f"demo_package-{versions[0]}.tar.gz"
@@ -404,7 +404,7 @@ def test_builds_and_publishes_each_distinct_release_version(workflow, workspace,
     result = run_build(versions=versions)
     assert result.returncode == 0, result.stdout + result.stderr
     unique_versions = list(dict.fromkeys(versions))
-    assert result.stdout.count("已构建源码包版本：") == len(unique_versions)
+    assert result.stdout.count("Built sdist version: ") == len(unique_versions)
     assert {p.name for p in (workspace / "sdist/builds").iterdir()} == set(unique_versions)
     archives = list((workspace / "sdist/dist").glob("*.tar.gz"))
     assert len(archives) == len(unique_versions)
@@ -446,8 +446,8 @@ def test_builds_and_publishes_each_distinct_release_version(workflow, workspace,
 
 def test_wheel_build_uses_caller_command_and_full_history(workflow):
     steps = workflow["jobs"]["matrix-job"]["steps"]
-    checkout = next(step for step in steps if step.get("name") == "检出待编译仓库")
-    build = next(step for step in steps if step.get("name") == "编译")
+    checkout = next(step for step in steps if step.get("name") == "Check out the repository to build")
+    build = next(step for step in steps if step.get("name") == "Build")
     assert checkout["with"]["fetch-depth"] == "0"
     assert checkout["with"]["submodules"] == "recursive"
     assert checkout["with"]["persist-credentials"] == "false"
@@ -463,20 +463,20 @@ def template_module(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
-    # 在模块边界阻断外部命令，不影响其他脚本的集成测试。
+    # Block external commands at the module boundary without affecting other scripts' integration tests.
     monkeypatch.setattr(module, "subprocess", SimpleNamespace(
         PIPE=subprocess.PIPE, run=create_autospec(
-            subprocess.run, side_effect=AssertionError("测试禁止真实执行外部命令"))))
+            subprocess.run, side_effect=AssertionError("the test forbids real external command execution"))))
     return module
 
 
 @pytest.fixture
 def setup_template(template_module, monkeypatch):
-    # 仅导入安装模板，阻断真实下载和外部命令；需要的环境探测由测试显式模拟。
+    # Import only the install template, blocking real downloads and external commands; required environment probing is explicitly mocked by the test.
     module = template_module
     for name in ("download_file", "run_cmd"):
         monkeypatch.setattr(module, name, create_autospec(
-            getattr(module, name), side_effect=AssertionError("测试禁止真实下载或外部命令")))
+            getattr(module, name), side_effect=AssertionError("the test forbids real downloads or external commands")))
     return module
 
 
@@ -497,7 +497,7 @@ def test_runtime_falls_back_to_hgcc_for_missing_or_invalid_env(setup_template, m
     runner = setup_template.subprocess.run
     runner.side_effect = None
     output = {"stdout": "", "stderr": ""}
-    output[stream] = "编译器版本信息\nRuntime API version v2\n"
+    output[stream] = "compiler version info\nRuntime API version v2\n"
     runner.return_value = subprocess.CompletedProcess(["hgcc", "--version"], 0, **output)
     assert setup_template.get_runtime_version() == "2"
     runner.assert_called_once_with(["hgcc", "--version"], stdout=subprocess.PIPE,
@@ -591,7 +591,7 @@ def test_cuda_detection_handles_nvcc_failure(setup_template, monkeypatch, error)
     "13.0",
     pytest.param("13.0.0", marks=pytest.mark.xfail(
         strict=True, raises=AssertionError,
-        reason="安装缺陷：三段 CUDA 环境版本生成 cu1300，但矩阵发布 cu130")),
+        reason="install defect: a three-part CUDA environment version produces cu1300, but the matrix publishes cu130")),
 ])
 def test_installer_filename_matches_real_release_matrix(
     generate_matrix, setup_template, monkeypatch, runtime
@@ -615,7 +615,7 @@ def test_installer_filename_matches_real_release_matrix(
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="安装缺陷：预编译二进制 wheel 被错误重命名为 py3-none-any")
+                   reason="install defect: a prebuilt binary wheel is wrongly renamed to py3-none-any")
 @pytest.mark.parametrize("python_tag", ["cp310", "cp312"])
 def test_cached_binary_wheel_preserves_compatibility_tags(setup_template, workspace, monkeypatch, python_tag):
     from wheel.wheelfile import WheelFile
@@ -624,7 +624,7 @@ def test_cached_binary_wheel_preserves_compatibility_tags(setup_template, worksp
     version = "1.0.0+ppu2.2.0"
     filename = f"demo_package-{version}-{python_tag}-{python_tag}-linux_x86_64.whl"
     dist_info = f"demo_package-{version}.dist-info"
-    # 使用真实 wheel ZIP、METADATA、WHEEL 和自动生成的 RECORD，不执行伪二进制内容。
+    # Use a real wheel ZIP with METADATA, WHEEL, and an auto-generated RECORD, without executing fake binary content.
     with WheelFile(filename, "w") as wheel:
         wheel.writestr("demo_package/native.so", b"offline binary fixture")
         wheel.writestr(f"{dist_info}/METADATA",
@@ -645,7 +645,7 @@ def test_cached_binary_wheel_preserves_compatibility_tags(setup_template, worksp
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="安装缺陷：PEP 517 需求探测在声明构建依赖前强制导入隔离环境中不存在的 Torch")
+                   reason="install defect: PEP 517 requirement probing force-imports Torch, absent in the isolated environment, before declaring build dependencies")
 def test_pep517_requirements_hook_without_host_torch(workspace):
     template = SETUP_TEMPLATE.read_text().replace('PACKAGE_NAME = ""', 'PACKAGE_NAME = "demo_package"')
     template = template.replace('build_version = ""', 'build_version = "1.0.0+ppu2.2.0"')
@@ -653,18 +653,18 @@ def test_pep517_requirements_hook_without_host_torch(workspace):
     project = workspace / "isolated-build"
     project.mkdir()
     (project / "setup.py").write_text(template)
-    # 真实执行 PEP 517 后端；模拟隔离环境中没有 Torch，并阻断所有 SDK/下载命令。
+    # Run the PEP 517 backend for real; simulate Torch being absent in the isolated environment and block all SDK/download commands.
     probe = '''
 import socket
 import subprocess
 import sys
 from setuptools.build_meta import get_requires_for_build_wheel
 sys.modules["torch"] = None
-socket.socket.connect = lambda *a, **k: (_ for _ in ()).throw(AssertionError("禁止网络"))
+socket.socket.connect = lambda *a, **k: (_ for _ in ()).throw(AssertionError("network disabled"))
 def run(*args, **kwargs):
     if kwargs.get("args") == "cat /etc/os-release":
         return subprocess.CompletedProcess(args, 0, 'NAME="Ubuntu"\\nVERSION_ID="24.04"', "")
-    raise AssertionError("禁止运行外部命令")
+    raise AssertionError("external command execution disabled")
 subprocess.run = run
 get_requires_for_build_wheel()
 '''
@@ -718,7 +718,7 @@ def test_remote_strategy_receives_environment_and_caches_result(strategy_environ
     SimpleNamespace(run=Mock(return_value=(None, None, None))),
     SimpleNamespace(run=Mock(return_value=("", "", ""))),
     SimpleNamespace(run=Mock(return_value=("wrong-shape",))),
-    SimpleNamespace(run=Mock(side_effect=ValueError("策略错误"))),
+    SimpleNamespace(run=Mock(side_effect=ValueError("strategy error"))),
 ])
 def test_invalid_remote_strategy_fails_closed(strategy_environment, monkeypatch, plugin):
     module = strategy_environment
@@ -755,7 +755,7 @@ def test_extracts_metadata_from_real_wheel_zip(setup_template, workspace, kind, 
     ('Requires-Dist: numpy; "arm" not in platform_machine and extra == "test"\n',
      [], {"test": ['numpy; "arm" not in platform_machine']}),
     ("Requires-Dist: numpy\n\nRequires-Dist: injected\n", ["numpy"], {}),
-    ("Description: 示例\n        Requires-Dist: injected\nRequires-Dist: numpy\n", ["numpy"], {}),
+    ("Description: example\n        Requires-Dist: injected\nRequires-Dist: numpy\n", ["numpy"], {}),
     ("Requires-Dist: ???\nRequires-Dist: \nRequires-Dist: numpy\n", ["numpy"], {}),
     ("", [], {}),
 ])
@@ -812,7 +812,7 @@ def test_sdk_environment_is_optional(setup_template, monkeypatch, value):
 
 @pytest.mark.parametrize("source,expected", [
     ("def run(data, context):\n    return data['value']\n", 42),
-    ("raise ValueError('无效插件')\n", None), ("def broken(:\n", None),
+    ("raise ValueError('invalid plugin')\n", None), ("def broken(:\n", None),
 ])
 def test_loads_local_strategy_or_reports_invalid_plugin(setup_template, workspace, source, expected):
     plugin_path = workspace / "strategy.py"
@@ -841,7 +841,7 @@ def test_download_returns_existing_file_without_real_network(template_module, wo
 
 
 @pytest.mark.parametrize("status,exception,expected_exit", [
-    (0, None, 1), (1, None, 1), (None, OSError("下载器不可用"), -1),
+    (0, None, 1), (1, None, 1), (None, OSError("downloader unavailable"), -1),
 ])
 def test_download_errors_abort_without_running_network(template_module, workspace, monkeypatch,
                                                       status, exception, expected_exit):
@@ -854,8 +854,6 @@ def test_download_errors_abort_without_running_network(template_module, workspac
     template_module.subprocess.run.assert_not_called()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="安全缺陷：bootstrap 源码包包含硬编码的制品仓库下载密码")
 def test_bootstrap_sdist_does_not_embed_download_password(workspace, run_build):
     result = run_build()
     assert result.returncode == 0, result.stderr
@@ -867,5 +865,5 @@ def test_bootstrap_sdist_does_not_embed_download_password(workspace, run_build):
         if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str) and node.value.value
                 and any(isinstance(target, ast.Name) and target.id == "password" for target in node.targets)):
-            # 不把发现的凭据写入断言或测试日志。
-            raise AssertionError("发布的源码包包含硬编码下载密码")
+            # Do not write any discovered credential into assertions or test logs.
+            raise AssertionError("the published sdist embeds a hardcoded download password")
