@@ -1,6 +1,7 @@
 """Offline tests for temporary wheel publishing; uploads are mocked without accessing a real Artifactory instance."""
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import importlib.util
 import os
 from pathlib import Path
@@ -51,7 +52,7 @@ def run_publish(publisher, workspace, monkeypatch):
     monkeypatch.delenv("PACKAGE_NAME", raising=False)
     monkeypatch.delenv("WHEEL_NAME", raising=False)
     clock = Mock()
-    clock.now.return_value = datetime(2026, 11, 2, 12, 11, 59, tzinfo=timezone.utc)
+    clock.now.return_value = datetime(2026, 11, 2, 12, 11, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr(publisher, "datetime", clock)
     monkeypatch.setenv("RELEASE_USERNAME", "test-user")
     monkeypatch.setenv("RELEASE_TOKEN", "test-token")
@@ -88,12 +89,12 @@ def test_upload_is_exact_and_https_only(make_wheel, run_publish, workspace):
 def test_all_nested_wheels_share_one_timestamp_across_minutes(make_wheel, run_publish, publisher, workspace):
     paths = [make_wheel(filename="b.whl"), make_wheel(filename="a.whl", directory="artifact/nested")]
     publisher.datetime.now.side_effect = [
-        datetime(2026, 11, 2, 12, 11, 59, tzinfo=timezone.utc),
-        datetime(2026, 11, 2, 12, 12, 1, tzinfo=timezone.utc),
+        datetime(2026, 11, 2, 12, 11, 59, tzinfo=ZoneInfo("Asia/Shanghai")),
+        datetime(2026, 11, 2, 12, 12, 1, tzinfo=ZoneInfo("Asia/Shanghai")),
     ]
     code, transport = run_publish()
     assert code == 0
-    publisher.datetime.now.assert_called_once_with(timezone.utc)
+    publisher.datetime.now.assert_called_once_with(ZoneInfo("Asia/Shanghai"))
     assert transport.call_count == 2
     for call, path in zip(transport.call_args_list, sorted(paths)):
         args = call.args[0]
@@ -104,10 +105,21 @@ def test_all_nested_wheels_share_one_timestamp_across_minutes(make_wheel, run_pu
 
 def test_timestamp_is_zero_padded_and_uses_24_hour_time(make_wheel, run_publish, publisher):
     make_wheel()
-    publisher.datetime.now.return_value = datetime(2026, 1, 2, 23, 4, 59, tzinfo=timezone.utc)
+    publisher.datetime.now.return_value = datetime(2026, 1, 2, 23, 4, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
     code, transport = run_publish()
     assert code == 0
     assert transport.call_args.args[0][-1].endswith("/2026-01-02-2304/" + WHEEL_NAME)
+
+
+@pytest.mark.parametrize("utc_hour,expected", [(4, "2026-11-02-1211"), (20, "2026-11-03-0411")])
+def test_timestamp_uses_shanghai_time(make_wheel, run_publish, publisher, utc_hour, expected):
+    make_wheel()
+    instant = datetime(2026, 11, 2, utc_hour, 11, 59, tzinfo=timezone.utc)
+    publisher.datetime.now.side_effect = lambda tz: instant.astimezone(tz)
+    code, transport = run_publish()
+    assert code == 0
+    publisher.datetime.now.assert_called_once_with(ZoneInfo("Asia/Shanghai"))
+    assert transport.call_args.args[0][-1].endswith(f"/{expected}/{WHEEL_NAME}")
 
 
 def test_only_exact_whl_suffix_files_are_uploaded(make_wheel, run_publish, workspace):
@@ -367,7 +379,7 @@ def test_readme_documents_interface_and_local_links():
                      "workflows/demo-push-tmp-wheel.yml"):
         assert f"]({relative})" in text
         assert (ROOT / relative).is_file()
-    assert "UTC" in text and "2026-11-02-1211" in text
+    assert "Asia/Shanghai (UTC+08:00)" in text and "2026-11-02-1211" in text
     assert "https://pkg.flytiger-eco.com/artifactory/pypi_tmp/{timestamp}/{filename}" in text
     assert "No wheel validation" in text
     assert "| `package_name` |" not in text and "| `wheel_name` |" not in text
