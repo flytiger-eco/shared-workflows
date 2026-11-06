@@ -18,6 +18,7 @@ All PPU resources are requested by the worker pods it creates.
 - Separate scheduling and workload-log steps: the first waits for every pod to be scheduled; the second reports image pull/startup and streams worker-0 logs from the beginning until completion. Both share the `timeout_minutes` budget, and cleanup runs on failure or cancellation.
 - One-line `PPU usage` notice on the run page plus a collapsed usage summary in the job log, covering queue time and occupied/execution PPU card-hours; the GitHub Job Summary is left untouched.
 - One `PPU queue` annotation emitted after the job ends, listing each pod's queue time (creation until scheduling). It is a warning with the latest scheduling failure reason when any pod queued for five minutes or more or never scheduled, and a notice otherwise. Apart from these two and errors, the action creates no run annotations.
+- Logs of failed workers are shown, one group per pod, before cleanup removes them; log reads are time-limited and a read error never overrides the job result.
 - Optional kernel log (`dmesg`) collection from worker nodes.
 
 ## Usage
@@ -53,6 +54,43 @@ jobs:
 | `0` (default) | Single pod | One pod, no `PodGroup` or headless `Service` |
 | `1..N` | Gang | `N` worker pods, a `PodGroup` (`minMember=N`) and a headless `Service` for rendezvous |
 
+### Launch modes
+
+`launch_mode` selects where commands run and is independent of the pod allocation.
+With the default `each-node`, behavior is unchanged: every pod runs `setup_command`
+and then `command`. With `master` and two or more nodes, every pod first installs
+SSH and joins a trusted passwordless mesh, then runs `setup_command`; only worker-0
+runs the foreground `command`, while the other workers keep supervised SSH services
+until cleanup. MPI is just one launcher that can be used in this mode.
+
+### SSH installation
+
+In multi-node master mode, each root container gets `openssh-server`, the SSH
+client, `jq` and the packages they depend on. Suitable existing tools are kept;
+otherwise authenticated packages are taken from `/mnt/wl_nas/devops/cache/openssh`
+or downloaded from Aliyun mirrors and added to that cache. The image's global
+APT/YUM repository configuration stays untouched.
+
+| Image OS | Package path |
+| --- | --- |
+| Ubuntu 20.04/22.04/24.04; Debian 11/12/13 | APT with authenticated distribution metadata |
+| CentOS Linux 7 (x86_64) | YUM with signed RPMs |
+| CentOS Linux 8; CentOS Stream 8/9 (x86_64/aarch64) | DNF with signed RPMs |
+| Alibaba Cloud Linux 2/3 (x86_64/aarch64) | YUM/DNF with signed RPMs |
+
+End-of-life CentOS releases are served from the matching Aliyun archive, which
+does not imply continued security updates. On CentOS 7 and Alibaba Cloud Linux 2,
+`jq` comes from signed EPEL 7 packages. RPM signing keys are pinned to the vendor
+identities; checksums or keys found on NAS are never trusted on their own.
+
+Images need a writable root filesystem, Bash, their package manager, GNU timeout
+and checksum tools, and a working TLS trust store; RPM images also need signature
+verification and key download tools. MPI, PCCL, the accelerator SDK and other
+frameworks must still come from the image or `setup_command`. SSH installation
+does not enable privileged mode, build from source or fall back to other mirrors.
+Master mode also needs Secret permissions in the namespace and a NAS runtime root
+owned by the runner, both provisioned by cluster operators.
+
 ### Source staging
 
 Git configuration files are excluded from the source archive, including repository,
@@ -70,7 +108,10 @@ with a warning.
 | Name | Required | Default | Description |
 |------|----------|---------|-------------|
 | `image` | yes | | Container image with job code and dependencies |
-| `command` | yes | | Shell command executed in each worker pod (`/bin/bash -c`) |
+| `command` | yes | | Foreground shell command (`/bin/bash -c`), run on every pod or only on worker-0 depending on `launch_mode` |
+| `launch_mode` | no | `each-node` | `each-node` or `master` |
+| `setup_command` | no | | Per-pod initialization; in multi-node master mode it runs after the SSH mesh is ready and its exported variables are kept |
+| `ssh_port` | no | `2222` | Preferred SSH port; when it is taken, each node picks a free alternative |
 | `nnodes` | no | `0` | `0` selects one standalone pod; positive values set the gang worker count |
 | `nproc_per_node` | no | `1` | PPU cards requested per pod (`alibabacloud.com/ppu`) |
 | `namespace` | no | `default` | Kubernetes namespace |
@@ -122,6 +163,19 @@ Each worker pod receives:
 | `MASTER_ADDR` | `127.0.0.1` in single-pod mode; worker-0 DNS via the headless `Service` in gang mode |
 | `MASTER_PORT` | `master_port` input |
 | `NODE_NAME` | Kubernetes node name |
+| `SOURCE_DIR` | Source extraction directory |
+| `CLUSTER_HOSTS_FILE` | Multi-node master: local ordered FQDN list |
+| `CLUSTER_NODES_FILE` | Multi-node master: local node metadata with actual SSH ports |
+
+In master mode, `cluster-ssh` and `cluster-exec` connect to each node on its actual
+SSH port with strict host-key checking. A target may be the trusted FQDN, a pod or
+host IP that maps to one node, or a short hostname (first DNS label) that matches
+exactly one node; the connection always goes to the mapped FQDN and rank host key.
+Remote commands load the target node's exported environment. `RANK` and
+`WORLD_SIZE` describe nodes, not MPI processes. The command on worker-0 must wait
+for its remote tasks and return their failures. The command's completion time is
+recorded separately from container shutdown; at most ten seconds past the deadline
+are used to report the result and stop SSH services, never to run the command longer.
 
 Variables declared in the workflow or job `env` context are forwarded automatically.
 
@@ -145,6 +199,6 @@ pod independently, so multi-node jobs are accounted for correctly.
 
 ```
 action.yml          Composite action definition
-scripts/            Naming, submission, cleanup and dmesg scripts
-tests/              Lifecycle and staging regression tests
+scripts/            Naming, submission, monitoring, cleanup, SSH and dmesg scripts
+tests/              Lifecycle, staging, master runtime and SSH installer tests
 ```
