@@ -24,7 +24,10 @@ RUN_ID = "100"
 RUN_ATTEMPT = "1"
 VERSION = "1.2.3"
 UPLOAD_DIR = f"{BASE_URL}/{RUN_ID}/{RUN_ATTEMPT}/{VERSION}/"
-STORAGE_DIR = f"{BASE_URL}/api/storage/{RUN_ID}/{RUN_ATTEMPT}/{VERSION}/"
+STORAGE_DIR = (
+    "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/"
+    f"{RUN_ID}/{RUN_ATTEMPT}/{VERSION}/"
+)
 DEMO_FILENAME = "demo.txt"
 
 DEFAULT_INPUTS = {
@@ -99,7 +102,18 @@ def make_file(workspace):
 
 @pytest.fixture
 def run_upload(uploader, workspace, monkeypatch):
-    transport = Mock(return_value=subprocess.CompletedProcess([], 0, "201", ""))
+    def respond(args, **kwargs):
+        url, source = _last_curl_flags(args)
+        if url.startswith("https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/"):
+            assert source == os.devnull
+            assert url.endswith("&recursive=0")
+            _query_pairs(url)
+            return subprocess.CompletedProcess(args, 0, "204", "")
+        assert url.startswith(BASE_URL + "/")
+        # A misplaced /api/storage is an ordinary artifact upload and returns 201.
+        return subprocess.CompletedProcess(args, 0, "201", "")
+
+    transport = Mock(side_effect=respond)
     monkeypatch.setattr(uploader.subprocess, "run", transport)
 
     def run(inputs=None, **environment):
@@ -134,10 +148,24 @@ def _last_curl_flags(args):
 def _query_pairs(url):
     _, _, query = url.partition("?")
     assert query.startswith("properties="), url
+    properties, separator, options = query[len("properties="):].partition("&")
+    assert (separator, options) == ("&", "recursive=0")
     pairs = {}
-    for chunk in query[len("properties="):].split(","):
-        key, _, value = chunk.partition(";")
-        pairs[unquote(key)] = unquote(value)
+    for chunk in properties.split(";"):
+        key, separator, value = chunk.partition("=")
+        assert separator == "=" and key, chunk
+        decoded = iter(unquote(value))
+        literal = []
+        for char in decoded:
+            if char == "\\":
+                escaped = next(decoded, None)
+                assert escaped in ("\\", ",", "|", "="), value
+                literal.append(escaped)
+            else:
+                assert char not in ",|=", value
+                literal.append(char)
+        assert unquote(key) not in pairs
+        pairs[unquote(key)] = "".join(literal)
     return pairs
 
 
@@ -179,14 +207,51 @@ def test_property_query_carries_every_configured_field(make_file, run_upload):
         assert pairs[key] == expected[key], key
 
 
-def test_property_values_are_percent_encoded_against_separator_injection(make_file, run_upload):
+def test_property_query_matches_artifactory_wire_format(uploader):
+    assert uploader.build_property_query(DEFAULT_INPUTS, DEFAULT_CONTEXT_ENV) == (
+        "properties=package_type=raw;package_name=demo_package;package_version=1.2.3;"
+        "os=ubuntu24.04;python_version=3.12;runtime=13.0.0;torch_version=;"
+        "sdk_version=2.2.0;package_edition=standard;branch=main;tag=;"
+        "commit=abcdef1234567890;log_url=https%3A%2F%2Fexample.invalid%2Flogs%2F100;"
+        "extra_info="
+    )
+
+
+@pytest.mark.parametrize("value,encoded", [
+    ("1=1", "1%5C%3D1"),
+    ("a,b", "a%5C%2Cb"),
+    ("a|b", "a%5C%7Cb"),
+    ("C:\\build\\", "C%3A%5C%5Cbuild%5C%5C"),
+    ("a;b", "a%3Bb"),
+    ("a&recursive=1#x%+", "a%26recursive%5C%3D1%23x%25%2B"),
+    ('{"note":"a,b;c=d"}', "%7B%22note%22%3A%22a%5C%2Cb%3Bc%5C%3Dd%22%7D"),
+])
+def test_property_values_are_escaped_and_percent_encoded(value, encoded, make_file, run_upload):
     make_file()
-    inputs = dict(DEFAULT_INPUTS, extra_info='{"note":"a,b;c=d"}')
-    code, transport = run_upload(inputs=inputs)
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, extra_info=value))
     assert code == 0
     storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
-    assert "%3B" in storage_url and "%2C" in storage_url
-    assert _query_pairs(storage_url)["extra_info"] == '{"note":"a,b;c=d"}'
+    assert storage_url.endswith(f";extra_info={encoded}&recursive=0")
+    assert _query_pairs(storage_url)["extra_info"] == value
+
+
+def test_reported_run_targets_the_existing_artifact(make_file, run_upload):
+    make_file()
+    code, transport = run_upload(
+        inputs=dict(DEFAULT_INPUTS, version="test0001"),
+        GITHUB_RUN_ID="42607174840",
+    )
+    assert code == 0
+    upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert upload_url == (
+        "https://pkg.flytiger-eco.com/artifactory/github_generic/42607174840/1/test0001/demo.txt"
+    )
+    assert storage_url.partition("?")[0] == (
+        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/42607174840/1/test0001/demo.txt"
+    )
+    assert "github_generic/api/storage/" not in storage_url
+    assert _query_pairs(storage_url) == expected_property_values()
 
 
 @pytest.mark.parametrize("filename,encoded", [
@@ -246,14 +311,17 @@ def test_invalid_url_inputs_rejected_before_any_request(key, value, make_file, r
     assert not (workspace / "marker").exists()
 
 
-def test_artifact_base_url_is_not_a_workflow_input(make_file, run_upload):
-    # The base URL is a script constant; supplying it through inputs must not change the destination.
+def test_upload_destination_cannot_be_overridden_by_inputs(make_file, run_upload):
+    # The service and repository are script constants, not caller inputs.
     make_file()
-    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, artifact_base_url="https://attacker.invalid"))
+    code, transport = run_upload(inputs=dict(
+        DEFAULT_INPUTS, artifact_base_url="https://attacker.invalid", repository_id="other_repo",
+    ))
     assert code == 0
-    args = [call.args[0] for call in transport.call_args_list]
-    urls = [a[a.index("--") + 1] for a in args]
-    assert all(url.startswith(BASE_URL) for url in urls)
+    upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert upload_url == UPLOAD_DIR + DEMO_FILENAME
+    assert storage_url.partition("?")[0] == STORAGE_DIR + DEMO_FILENAME
 
 
 @pytest.mark.parametrize("key", [
@@ -346,7 +414,7 @@ def test_missing_or_invalid_credentials_never_upload(key, value, make_file, run_
 
 def test_upload_failure_stops_before_setting_properties(make_file, run_upload, uploader, workspace):
     make_file()
-    uploader.subprocess.run.return_value = subprocess.CompletedProcess([], 22, "500", "")
+    uploader.subprocess.run.side_effect = [subprocess.CompletedProcess([], 22, "500", "")]
     code, transport = run_upload()
     assert code == 1
     assert transport.call_count == 1
@@ -364,6 +432,26 @@ def test_property_failure_stops_batch_without_success_output(make_file, run_uplo
     assert code == 1
     assert transport.call_count == 2
     assert not (workspace / "outputs").exists()
+
+
+@pytest.mark.parametrize("status", ["200", "201", "202", "301", "400", "401", "403", "404", "500"])
+def test_property_response_requires_204(status, make_file, run_upload, uploader, workspace, capsys):
+    make_file(filename="a.txt")
+    make_file(filename="b.txt")
+    uploader.subprocess.run.side_effect = [
+        subprocess.CompletedProcess([], 0, "201", ""),
+        subprocess.CompletedProcess([], 0, status, ""),
+        subprocess.CompletedProcess([], 0, "201", ""),
+        subprocess.CompletedProcess([], 0, "204", ""),
+    ]
+    code, transport = run_upload()
+    assert code == 1
+    assert transport.call_count == 2
+    assert not (workspace / "outputs").exists()
+    captured = capsys.readouterr()
+    assert f"HTTP {status}" in captured.err
+    assert "Uploaded:" not in captured.out
+    assert "test-token" not in captured.out + captured.err
 
 
 def test_timeout_is_reported_without_leaking_credentials(make_file, run_upload, uploader, capsys):

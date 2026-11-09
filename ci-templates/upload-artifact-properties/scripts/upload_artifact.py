@@ -8,8 +8,9 @@ The base URL (including the repository key) is fixed here rather than passed as 
 workflow input so callers cannot redirect uploads and property writes to an
 unintended host. After each successful PUT, the script issues a second PUT against
 `/api/storage/...` with a `properties=` query so every configured field is stored
-as an Artifactory item property. Values are percent-encoded so commas and semicolons
-inside user data do not break the `{key};{value},{key};{value}` syntax.
+as an Artifactory item property. The API path precedes the repository key. Values
+are escaped for Artifactory and then percent-encoded using the
+`{key}={value};{key}={value}` syntax. Property updates require HTTP 204.
 """
 
 import json
@@ -21,7 +22,9 @@ import sys
 from urllib.parse import quote
 
 
-ARTIFACTORY_BASE_URL = "https://pkg.flytiger-eco.com/artifactory/github_generic"
+ARTIFACTORY_URL = "https://pkg.flytiger-eco.com/artifactory"
+ARTIFACTORY_REPOSITORY = "github_generic"
+ARTIFACTORY_BASE_URL = f"{ARTIFACTORY_URL}/{ARTIFACTORY_REPOSITORY}"
 PROPERTY_KEYS = (
     "package_type",
     "package_name",
@@ -120,8 +123,11 @@ def build_property_query(inputs, env):
             raise ValueError(f"{key} must be a string")
         if key in REQUIRED_PROPERTY_KEYS and not value:
             raise ValueError(f"{key} must not be empty")
-        pairs.append(f"{quote(key, safe=';=,')};{quote(value, safe='')}")
-    return "properties=" + ",".join(pairs)
+        # Escape Artifactory's value separators before URL encoding; percent-encoding
+        # alone does not protect them after the server decodes the query values.
+        escaped_value = re.sub(r"([\\,|=])", r"\\\1", value)
+        pairs.append(f"{quote(key, safe='')}={quote(escaped_value, safe='')}")
+    return "properties=" + ";".join(pairs)
 
 
 def validate_credentials(username, token):
@@ -140,7 +146,7 @@ def build_context(inputs, run_id, run_attempt):
     return "/".join(quote(part, safe="") for part in (run_id, run_attempt, version))
 
 
-def _run_curl(extra_args, request_timeout):
+def _run_curl(extra_args, request_timeout, expected_status=None):
     result = subprocess.run(
         [
             "curl", "--disable", "--fail", "--silent", "--show-error", "--retry", "3",
@@ -159,6 +165,8 @@ def _run_curl(extra_args, request_timeout):
         raise ValueError(
             f"Artifactory request failed: curl exit code {result.returncode}, HTTP {safe_status}"
         )
+    if expected_status is not None and status != expected_status:
+        raise ValueError(f"Artifactory request returned HTTP {status}; expected HTTP {expected_status}")
 
 
 def upload_file(path, url, username, token):
@@ -179,9 +187,10 @@ def set_properties(storage_url, query, username, token):
         [
             "--user", f"{username}:{token}",
             "--upload-file", os.devnull,
-            "--", f"{storage_url}?{query}",
+            "--", f"{storage_url}?{query}&recursive=0",
         ],
         PROPERTY_TIMEOUT,
+        expected_status="204",
     )
 
 
@@ -227,7 +236,7 @@ def main():
         for path in paths:
             file_path = f"{encoded_prefix}/{quote(path.name, safe='')}"
             file_url = f"{ARTIFACTORY_BASE_URL}/{file_path}"
-            storage_url = f"{ARTIFACTORY_BASE_URL}/api/storage/{file_path}"
+            storage_url = f"{ARTIFACTORY_URL}/api/storage/{ARTIFACTORY_REPOSITORY}/{file_path}"
             upload_file(path, file_url, username, token)
             set_properties(storage_url, property_query, username, token)
             print(f"Uploaded: {file_url}", flush=True)

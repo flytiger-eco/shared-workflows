@@ -54,7 +54,7 @@ on:
         required: true
         type: string
       extra_info:
-        description: 'Artifactory item property: free-form extra information, such as a JSON string; commas and semicolons are percent-encoded'
+        description: 'Artifactory item property: free-form extra information, such as a JSON string; values are escaped for Artifactory and URL-encoded'
         required: false
         type: string
         default: ''

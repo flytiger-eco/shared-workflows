@@ -8,7 +8,15 @@ Upload destination:
 https://pkg.flytiger-eco.com/artifactory/github_generic/{run_id}/{run_attempt}/{version}/{filename}
 ```
 
-`run_id` and `run_attempt` come from `${{ github.run_id }}` and `${{ github.run_attempt }}`. The Artifactory base URL including the repository key is fixed inside [`scripts/upload_artifact.py`](scripts/upload_artifact.py) as `ARTIFACTORY_BASE_URL`; it is not a workflow input, so callers cannot redirect uploads or property writes to a different host. The template issues a second `PUT /api/storage/...?properties=...` request after every successful file upload so each item carries the configured metadata.
+`run_id` and `run_attempt` come from `${{ github.run_id }}` and `${{ github.run_attempt }}`. The service root (`ARTIFACTORY_URL`) and repository key (`ARTIFACTORY_REPOSITORY`, fixed to `github_generic`) are defined inside [`scripts/upload_artifact.py`](scripts/upload_artifact.py). Together they form `ARTIFACTORY_BASE_URL`; neither is a workflow input.
+
+After each successful upload, the template sets properties on that same item with an empty-body PUT to:
+
+```text
+https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/{run_id}/{run_attempt}/{version}/{filename}?properties=key1=value1;key2=value2&recursive=0
+```
+
+The `/api/storage/` prefix belongs before the repository key, not inside the repository. The property request must return `204 No Content`; a `201 Created` response is not accepted as a successful property update. See the [Set Item Properties API](https://docs.jfrog.com/artifactory/reference/setitemproperties).
 
 Four properties (`branch`, `tag`, `commit`, `log_url`) are derived from GitHub Actions context in the template workflow and injected into the script through environment variables (`GITHUB_BRANCH`, `GITHUB_TAG`, `GITHUB_SHA`, `GITHUB_LOG_URL`); they are not caller inputs and cannot be overridden by the calling repository.
 
@@ -86,7 +94,7 @@ Every field below is written as an Artifactory item property with the same name.
 | `package_edition` | Yes | Package edition, such as `standard` or `enterprise`. |
 | `extra_info` | No | Free-form extra information, such as a JSON string. |
 
-Property values are percent-encoded before being placed in the Artifactory `properties=` query, so any `,` or `;` inside user data does not shift the property boundaries.
+The query uses `properties=key1=value1;key2=value2`. Each field remains a single property value: literal commas, backslashes, pipes, and equals signs are backslash-escaped according to the Artifactory protocol before URL encoding. For example, `1=1` becomes `1%5C%3D1`, and `a,b` becomes `a%5C%2Cb`. Semicolons and other URL-sensitive characters inside values are percent-encoded; only the separators between property pairs remain literal semicolons.
 
 ### Context-derived Properties
 
@@ -130,7 +138,7 @@ Required property inputs (`artifact_name`, `version`, plus every input-sourced p
 
 - Both requests use HTTPS PUT with the username and token sent through Basic Auth. Redirects are not followed to avoid forwarding files or publishing credentials to other destinations.
 - Files upload sequentially in sorted local-path order. If any upload or property-set request fails, the job stops and emits neither `batch_url` nor `upload_urls`; files already uploaded are not rolled back.
-- Network or HTTP errors fail the job; only HTTP 2xx responses count as success. curl is configured for 3 retries, but not every error is retried.
+- Network or HTTP errors fail the job. File uploads require HTTP 2xx; property updates require HTTP 204 specifically, including when another 2xx response is returned. curl is configured for 3 retries, but not every error is retried.
 - Artifactory accepts repeated property updates. Rerunning the workflow uploads the same URL again and overwrites existing properties, subject to repository permissions.
 - Empty or malformed publishing credentials also fail the job before any request is sent.
 
