@@ -1,0 +1,2 @@
+package_name=deep_gemm
+inputs_json={"package_name":"deep_gemm","python_versions":"[\"312\"]","os_versions":"[\"ubuntu2404\"]","runtime_versions":"[\"13.0.0\"]","torch_versions":"[\"2.13.0\"]","sdk_versions":"[\"2.2.0\"]","tag_version":""}

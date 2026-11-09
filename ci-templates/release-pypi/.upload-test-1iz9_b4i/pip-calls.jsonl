@@ -1,0 +1,1 @@
+["install", "--no-input", "torch==2.10.0", "-i", "https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple"]

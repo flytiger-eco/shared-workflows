@@ -1,0 +1,1 @@
+["--input", "/Users/syh/Documents/code/github/shared-workflows-flytiger/ci-templates/release-pypi/.upload-test-1iz9_b4i/origin/deep_gemm-1.0.0+v0.3.0-cp312-cp312-linux_x86_64.whl", "--output", "/Users/syh/Documents/code/github/shared-workflows-flytiger/ci-templates/release-pypi/.upload-test-1iz9_b4i/release", "--new-version", "1.0.0+v0.3.0.ppu2.2.0"]

@@ -144,3 +144,4 @@ jobs:
             printf 'Batch directory: %s\n' "$BATCH_URL"
             printf 'Uploaded files:\n%s\n' "$UPLOAD_URLS"
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
