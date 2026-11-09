@@ -1,0 +1,153 @@
+name: Reusable Upload Artifact Properties
+
+# Upload every regular file in the caller-provided Actions artifact to:
+#   https://pkg.flytiger-eco.com/artifactory/github_generic/{run_id}/{run_attempt}/{version}/{filename}
+# and then set the configured fields as Artifactory item properties via /api/storage.
+# The Artifactory base URL (including repository key) is fixed inside the upload script.
+# The branch, tag, commit, and log_url properties are derived from GitHub context in this workflow
+# and cannot be overridden by callers; the remaining properties come from inputs.
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        description: 'Artifact name saved by the caller using actions/upload-artifact@v4 in the current run; the calling job must declare needs on the producing job'
+        required: true
+        type: string
+      version:
+        description: 'Version path segment placed after run_attempt in the upload URL; may differ from the package_version property when the release layout uses a different grouping'
+        required: true
+        type: string
+      package_type:
+        description: 'Artifactory item property: package type, such as wheel, sdist, docker, or raw'
+        required: true
+        type: string
+      package_name:
+        description: 'Artifactory item property: package name'
+        required: true
+        type: string
+      package_version:
+        description: 'Artifactory item property: package version'
+        required: true
+        type: string
+      os:
+        description: 'Artifactory item property: operating system, such as ubuntu24.04'
+        required: true
+        type: string
+      python_version:
+        description: 'Artifactory item property: Python version, such as 3.12'
+        required: true
+        type: string
+      runtime:
+        description: 'Artifactory item property: runtime version, such as CUDA 13.0.0'
+        required: true
+        type: string
+      torch_version:
+        description: 'Artifactory item property: PyTorch version; pass an empty string when Torch is not applicable'
+        required: true
+        type: string
+      sdk_version:
+        description: 'Artifactory item property: SDK version'
+        required: true
+        type: string
+      package_edition:
+        description: 'Artifactory item property: package edition, such as standard or enterprise'
+        required: true
+        type: string
+      extra_info:
+        description: 'Artifactory item property: free-form extra information, such as a JSON string; commas and semicolons are percent-encoded'
+        required: false
+        type: string
+        default: ''
+      template_repository:
+        description: 'Repository containing this workflow and the upload script, in owner/repo format'
+        required: false
+        type: string
+        default: flytiger-eco/shared-workflows
+      template_ref:
+        description: 'Must match the ref used to call this workflow; a commit SHA is recommended; use github.sha for same-repository relative-path calls'
+        required: true
+        type: string
+    outputs:
+      batch_url:
+        description: 'Directory URL shared by every uploaded file, ending with a trailing slash; emitted only after all uploads and property setters succeed'
+        value: ${{ jobs.upload-artifact.outputs.batch_url }}
+      upload_urls:
+        description: 'Newline-separated list of the uploaded file URLs, in sorted filename order'
+        value: ${{ jobs.upload-artifact.outputs.upload_urls }}
+    secrets:
+      template_token:
+        description: 'Read-only token for checking out a private template repository; usually unnecessary for same-repository calls or public templates'
+        required: false
+      release_username:
+        description: 'Artifactory publishing username from a caller repository or organization Actions Secret; requires PUT permission on the destination path and on the item properties'
+        required: true
+      release_token:
+        description: 'Artifactory publishing token from a caller repository or organization Actions Secret'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  upload-artifact:
+    name: Upload artifact files and set properties
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      batch_url: ${{ steps.upload.outputs.batch_url }}
+      upload_urls: ${{ steps.upload.outputs.upload_urls }}
+    steps:
+      - name: Validate required inputs
+        shell: bash
+        env:
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for pair in "ARTIFACT_NAME:artifact_name" "VERSION:version"; do
+            env_name="${pair%%:*}"
+            input_name="${pair##*:}"
+            value="${!env_name}"
+            if [[ -z "${value//[[:space:]]/}" ]]; then
+              printf '%s\n' "::error::${input_name} must not be empty" >&2
+              exit 1
+            fi
+          done
+
+      - name: Check out template tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.template_repository }}
+          ref: ${{ inputs.template_ref }}
+          path: ci-template
+          token: ${{ secrets.template_token || github.token }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Download only the named artifact from this run; download-artifact extracts it automatically.
+      - name: Download and extract artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ runner.temp }}/upload-artifact-properties-source
+
+      - name: Upload files and set Artifactory properties
+        id: upload
+        shell: bash
+        env:
+          INPUTS_JSON: ${{ toJSON(inputs) }}
+          ARTIFACT_DIR: ${{ runner.temp }}/upload-artifact-properties-source
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          # Context-derived Artifactory properties; the caller cannot override these through inputs.
+          GITHUB_BRANCH: ${{ github.ref_type == 'branch' && github.ref_name || '' }}
+          GITHUB_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_LOG_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_USERNAME: ${{ secrets.release_username }}
+          RELEASE_TOKEN: ${{ secrets.release_token }}
+        run: python ci-template/ci-templates/upload-artifact-properties/scripts/upload_artifact.py
