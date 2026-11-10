@@ -22,11 +22,12 @@ DEMO = ROOT / "workflows/demo-upload-artifact-properties.yml"
 BASE_URL = "https://pkg.flytiger-eco.com/artifactory/github_generic"
 RUN_ID = "100"
 RUN_ATTEMPT = "1"
+CALLER_REPOSITORY = "caller-org/demo-repo"
 VERSION = "1.2.3"
-UPLOAD_DIR = f"{BASE_URL}/{RUN_ID}/{RUN_ATTEMPT}/{VERSION}/"
+UPLOAD_DIR = f"{BASE_URL}/{CALLER_REPOSITORY}/{RUN_ID}_{RUN_ATTEMPT}/{VERSION}/"
 STORAGE_DIR = (
     "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/"
-    f"{RUN_ID}/{RUN_ATTEMPT}/{VERSION}/"
+    f"{CALLER_REPOSITORY}/{RUN_ID}_{RUN_ATTEMPT}/{VERSION}/"
 )
 DEMO_FILENAME = "demo.txt"
 
@@ -121,6 +122,7 @@ def run_upload(uploader, workspace, monkeypatch):
             "ARTIFACT_DIR": str(workspace / "artifact"),
             "GITHUB_RUN_ID": RUN_ID,
             "GITHUB_RUN_ATTEMPT": RUN_ATTEMPT,
+            "GITHUB_REPOSITORY": CALLER_REPOSITORY,
             "INPUTS_JSON": json.dumps(DEFAULT_INPUTS if inputs is None else inputs),
             "RELEASE_USERNAME": "test-user",
             "RELEASE_TOKEN": "test-token",
@@ -245,13 +247,47 @@ def test_reported_run_targets_the_existing_artifact(make_file, run_upload):
     upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
     storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
     assert upload_url == (
-        "https://pkg.flytiger-eco.com/artifactory/github_generic/42607174840/1/test0001/demo.txt"
+        "https://pkg.flytiger-eco.com/artifactory/github_generic/caller-org/demo-repo/42607174840_1/test0001/demo.txt"
     )
     assert storage_url.partition("?")[0] == (
-        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/42607174840/1/test0001/demo.txt"
+        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/"
+        "caller-org/demo-repo/42607174840_1/test0001/demo.txt"
     )
     assert "github_generic/api/storage/" not in storage_url
     assert _query_pairs(storage_url) == expected_property_values()
+
+
+@pytest.mark.parametrize("repository", ["another-org/My_Repo.v2", "alice/.github", "team/_tools"])
+@pytest.mark.parametrize("attempt", ["1", "2"])
+def test_caller_repository_and_attempt_define_both_paths(repository, attempt, make_file, run_upload, workspace):
+    make_file()
+    code, transport = run_upload(
+        inputs=dict(DEFAULT_INPUTS, template_repository="template-org/template-tools"),
+        GITHUB_REPOSITORY=repository,
+        GITHUB_RUN_ATTEMPT=attempt,
+    )
+    assert code == 0
+    prefix = f"{repository}/100_{attempt}/1.2.3/"
+    upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert upload_url == f"{BASE_URL}/{prefix}demo.txt"
+    assert storage_url.partition("?")[0] == (
+        f"https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/{prefix}demo.txt"
+    )
+    assert (workspace / "outputs").read_text().startswith(f"batch_url={BASE_URL}/{prefix}\n")
+
+
+@pytest.mark.parametrize("repository", [
+    "", "owner", "owner/", "/repo", "owner/repo/extra", "../repo", "owner/.", "owner/..",
+    "owner/%2e%2e", "owner/repo?x=1", "owner/repo#frag", "owner/repo name", "owner/repo\\name",
+])
+def test_invalid_caller_repository_stops_before_upload(repository, make_file, run_upload, workspace, capsys):
+    make_file()
+    code, transport = run_upload(GITHUB_REPOSITORY=repository)
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+    assert "GITHUB_REPOSITORY" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("filename,encoded", [
@@ -502,6 +538,7 @@ def test_workflow_contract_and_step_order():
     assert upload["env"]["ARTIFACT_DIR"] == download["with"]["path"]
     assert upload["env"]["GITHUB_RUN_ID"] == "${{ github.run_id }}"
     assert upload["env"]["GITHUB_RUN_ATTEMPT"] == "${{ github.run_attempt }}"
+    assert upload["env"]["GITHUB_REPOSITORY"] == "${{ github.repository }}"
     assert upload["env"]["GITHUB_BRANCH"] == "${{ github.ref_type == 'branch' && github.ref_name || '' }}"
     assert upload["env"]["GITHUB_TAG"] == "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
     assert upload["env"]["GITHUB_SHA"] == "${{ github.sha }}"
@@ -591,7 +628,14 @@ def test_readme_documents_interface_and_local_links():
                      "workflows/demo-upload-artifact-properties.yml"):
         assert f"]({relative})" in text
         assert (ROOT / relative).is_file()
-    assert "https://pkg.flytiger-eco.com/artifactory/github_generic/{run_id}/{run_attempt}/{version}/{filename}" in text
+    assert (
+        "https://pkg.flytiger-eco.com/artifactory/github_generic/"
+        "{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}"
+    ) in text
+    assert (
+        "/api/storage/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}"
+    ) in text
+    assert "GITHUB_REPOSITORY" in text
     assert "{repository_id}" not in text and "{artifact_base_url}" not in text
     assert "/api/storage" in text and "properties=" in text
 

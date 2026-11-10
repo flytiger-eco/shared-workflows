@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version path segment placed after run_attempt in the upload URL'
+        description: 'Version path segment placed after run_id_run_attempt in the upload URL'
         required: true
         type: string
       package_type:

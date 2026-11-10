@@ -5,15 +5,15 @@ Download and extract the specified Actions artifact from the current GitHub Acti
 Upload destination:
 
 ```text
-https://pkg.flytiger-eco.com/artifactory/github_generic/{run_id}/{run_attempt}/{version}/{filename}
+https://pkg.flytiger-eco.com/artifactory/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}
 ```
 
-`run_id` and `run_attempt` come from `${{ github.run_id }}` and `${{ github.run_attempt }}`. The service root (`ARTIFACTORY_URL`) and repository key (`ARTIFACTORY_REPOSITORY`, fixed to `github_generic`) are defined inside [`scripts/upload_artifact.py`](scripts/upload_artifact.py). Together they form `ARTIFACTORY_BASE_URL`; neither is a workflow input.
+`owner` and `repository` come from the caller's `${{ github.repository }}`, passed to the script as `GITHUB_REPOSITORY` in `owner/repository` format. The owner is the organization name (or username for a personal repository), not the template repository owner. `run_id` and `run_attempt` come from `${{ github.run_id }}` and `${{ github.run_attempt }}` and form one directory named `{run_id}_{run_attempt}`. These values require no caller inputs; the `version` and `filename` segments are unchanged. The service root (`ARTIFACTORY_URL`) and repository key (`ARTIFACTORY_REPOSITORY`, fixed to `github_generic`) are defined inside [`scripts/upload_artifact.py`](scripts/upload_artifact.py). Together they form `ARTIFACTORY_BASE_URL`; neither is a workflow input.
 
 After each successful upload, the template sets properties on that same item with an empty-body PUT to:
 
 ```text
-https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/{run_id}/{run_attempt}/{version}/{filename}?properties=key1=value1;key2=value2&recursive=0
+https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}?properties=key1=value1;key2=value2&recursive=0
 ```
 
 The `/api/storage/` prefix belongs before the repository key, not inside the repository. The property request must return `204 No Content`; a `201 Created` response is not accepted as a successful property update. See the [Set Item Properties API](https://docs.jfrog.com/artifactory/reference/setitemproperties).
@@ -73,7 +73,7 @@ All inputs have type `string`.
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `artifact_name` | Yes | None | Name of the artifact saved by the caller using `actions/upload-artifact@v4`; must belong to the current workflow run. |
-| `version` | Yes | None | Version path segment placed after `run_attempt`; may differ from the `package_version` property when the release layout groups by a different value. |
+| `version` | Yes | None | Version path segment placed after `{run_id}_{run_attempt}`; may differ from the `package_version` property when the release layout groups by a different value. |
 | `template_repository` | No | `flytiger-eco/shared-workflows` | Repository containing the template script, in `owner/repo` format. |
 | `template_ref` | Yes | None | Template script version; must match the workflow version referenced by `uses`. |
 

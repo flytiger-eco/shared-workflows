@@ -2,7 +2,7 @@
 
 The destination layout is:
 
-    https://pkg.flytiger-eco.com/artifactory/github_generic/{run_id}/{run_attempt}/{version}/{filename}
+    https://pkg.flytiger-eco.com/artifactory/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}
 
 The base URL (including the repository key) is fixed here rather than passed as a
 workflow input so callers cannot redirect uploads and property writes to an
@@ -137,13 +137,17 @@ def validate_credentials(username, token):
         raise ValueError("Invalid publishing credential format")
 
 
-def build_context(inputs, run_id, run_attempt):
+def build_context(inputs, run_id, run_attempt, github_repository):
+    repository_match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)", github_repository)
+    if repository_match is None or repository_match.group(2) in (".", ".."):
+        raise ValueError("GITHUB_REPOSITORY must be in owner/repository format without path traversal")
+    owner, repository = repository_match.groups()
     version = validate_segment("version", string_input(inputs, "version"), SEGMENT_PATTERN)
     if not re.fullmatch(POSITIVE_INT_PATTERN, run_id):
         raise ValueError("GITHUB_RUN_ID must be a positive integer")
     if not re.fullmatch(POSITIVE_INT_PATTERN, run_attempt):
         raise ValueError("GITHUB_RUN_ATTEMPT must be a positive integer")
-    return "/".join(quote(part, safe="") for part in (run_id, run_attempt, version))
+    return "/".join(quote(part, safe="") for part in (owner, repository, f"{run_id}_{run_attempt}", version))
 
 
 def _run_curl(extra_args, request_timeout, expected_status=None):
@@ -224,6 +228,7 @@ def main():
             inputs,
             os.environ.get("GITHUB_RUN_ID", ""),
             os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+            os.environ.get("GITHUB_REPOSITORY", ""),
         )
         property_query = build_property_query(inputs, os.environ)
         username = os.environ.get("RELEASE_USERNAME", "")
