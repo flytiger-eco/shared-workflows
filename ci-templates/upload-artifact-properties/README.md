@@ -5,20 +5,20 @@ Download and extract the specified Actions artifact from the current GitHub Acti
 Upload destination:
 
 ```text
-https://pkg.flytiger-eco.com/artifactory/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}
+https://pkg.flytiger-eco.com/artifactory/github_generic/nightly/{owner}/{repository}/{version}/{filename}
 ```
 
-`owner` and `repository` come from the caller's `${{ github.repository }}`, passed to the script as `GITHUB_REPOSITORY` in `owner/repository` format. The owner is the organization name (or username for a personal repository), not the template repository owner. `run_id` and `run_attempt` come from `${{ github.run_id }}` and `${{ github.run_attempt }}` and form one directory named `{run_id}_{run_attempt}`. These values require no caller inputs; the `version` and `filename` segments are unchanged. The service root (`ARTIFACTORY_URL`) and repository key (`ARTIFACTORY_REPOSITORY`, fixed to `github_generic`) are defined inside [`scripts/upload_artifact.py`](scripts/upload_artifact.py). Together they form `ARTIFACTORY_BASE_URL`; neither is a workflow input.
+`owner` and `repository` come from the caller's `${{ github.repository }}`, passed to the script as `GITHUB_REPOSITORY` in `owner/repository` format. The owner is the organization name (or username for a personal repository), not the template repository owner. `run_id` and `run_attempt` come from `${{ github.run_id }}` and `${{ github.run_attempt }}`, are written only as the same-named properties, and no longer participate in the upload path. These values require no caller inputs; the path keeps the fixed `nightly` prefix plus the `version` and `filename` segments. The service root (`ARTIFACTORY_URL`) and repository key (`ARTIFACTORY_REPOSITORY`, fixed to `github_generic`) are defined inside [`scripts/upload_artifact.py`](scripts/upload_artifact.py). Together they form `ARTIFACTORY_BASE_URL`; neither is a workflow input.
 
 After each successful upload, the template sets properties on that same item with an empty-body PUT to:
 
 ```text
-https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}?properties=key1=value1;key2=value2&recursive=0
+https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/{owner}/{repository}/{version}/{filename}?properties=key1=value1;key2=value2&recursive=0
 ```
 
 The `/api/storage/` prefix belongs before the repository key, not inside the repository. The property request must return `204 No Content`; a `201 Created` response is not accepted as a successful property update. See the [Set Item Properties API](https://docs.jfrog.com/artifactory/reference/setitemproperties).
 
-Four properties (`branch`, `tag`, `commit`, `log_url`) are derived from GitHub Actions context in the template workflow and injected into the script through environment variables (`GITHUB_BRANCH`, `GITHUB_TAG`, `GITHUB_SHA`, `GITHUB_LOG_URL`); they are not caller inputs and cannot be overridden by the calling repository.
+Six properties (`branch`, `tag`, `commit`, `log_url`, `run_id`, `run_attempt`) are derived by the template from GitHub Actions context and injected into the script through environment variables (`GITHUB_BRANCH`, `GITHUB_TAG`, `GITHUB_SHA`, `GITHUB_LOG_URL`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`); they are not caller parameters and cannot be overridden through inputs.
 
 - Workflow entry point: [`.github/workflows/upload-artifact-properties.yml`](../../.github/workflows/upload-artifact-properties.yml)
 - Upload script: [`scripts/upload_artifact.py`](scripts/upload_artifact.py)
@@ -48,7 +48,7 @@ The reusable workflow runs in a separate job and does not share local files with
 2. Configure `RELEASE_USERNAME` and `RELEASE_TOKEN` in the caller repository or organization Actions Secrets. The account needs PUT permission on both the destination path and on the item properties in the target Artifactory repository.
 3. Ensure the caller can use the template repository workflows. Private template repositories must also allow cross-repository calls in Actions settings; configure `TEMPLATE_TOKEN` and uncomment the corresponding example line as needed.
 4. Replace the demo staging step with your real build command. Every regular file inside the saved artifact directory is uploaded; if only a subset should be published, upload a filtered artifact.
-5. Adjust the manual inputs to describe the artifact: `version` and the 10 property fields listed below (`branch`, `tag`, `commit`, `log_url` come from GitHub context automatically).
+5. Configure `version` and the 10 property inputs listed below; `branch`, `tag`, `commit`, `log_url`, `run_id`, and `run_attempt` come automatically from GitHub context.
 6. After committing the example to the caller default branch, trigger it manually through **Run workflow** on the Actions page and select a trusted branch.
 
 The example actually uploads to Artifactory; it is not a dry run. Files under this directory's `workflows/` are provided for copying and are not automatically registered as Actions workflows in this repository.
@@ -73,7 +73,7 @@ All inputs have type `string`.
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `artifact_name` | Yes | None | Name of the artifact saved by the caller using `actions/upload-artifact@v4`; must belong to the current workflow run. |
-| `version` | Yes | None | Version path segment placed after `{run_id}_{run_attempt}`; may differ from the `package_version` property when the release layout groups by a different value. |
+| `version` | Yes | None | Version path segment placed after the caller organization and repository names; may differ from the `package_version` property. |
 | `template_repository` | No | `flytiger-eco/shared-workflows` | Repository containing the template script, in `owner/repo` format. |
 | `template_ref` | Yes | None | Template script version; must match the workflow version referenced by `uses`. |
 
@@ -106,6 +106,8 @@ The following item properties are populated by the template workflow from GitHub
 | `tag` | `${{ github.ref_type == 'tag' && github.ref_name || '' }}` | Empty on branch triggers. |
 | `commit` | `${{ github.sha }}` | Always set to the SHA of the triggering revision. |
 | `log_url` | `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}` | Link to the workflow run page. |
+| `run_id` | `${{ github.run_id }}` | Current run ID, must be a positive integer, stored only as a property. |
+| `run_attempt` | `${{ github.run_attempt }}` | Attempt number of the current run, must be a positive integer, stored only as a property. |
 
 ## Secrets
 
@@ -132,14 +134,14 @@ Every regular file inside the downloaded artifact is uploaded, including files i
 
 The upload URL always uses only the file basename. Files with the same basename in different artifact subdirectories target the same URL; later uploads may overwrite earlier ones depending on Artifactory permissions. Use distinct filenames to preserve every file.
 
-Required property inputs (`artifact_name`, `version`, plus every input-sourced property field except `extra_info`) must not be empty; empty values abort the job before any PUT request is sent. Context-derived properties follow the same rule: `commit` and `log_url` must be non-empty, while `branch` and `tag` may be empty depending on the trigger ref type.
+Required property inputs (`artifact_name`, `version`, plus every input-sourced property field except `extra_info`) must not be empty; empty values abort the job before any PUT request is sent. Among the context-derived properties, `commit` and `log_url` must be non-empty, and `run_id` and `run_attempt` must be positive-integer strings; `branch` and `tag` may be empty depending on the trigger type.
 
 ## Upload and Failure Behavior
 
 - Both requests use HTTPS PUT with the username and token sent through Basic Auth. Redirects are not followed to avoid forwarding files or publishing credentials to other destinations.
 - Files upload sequentially in sorted local-path order. If any upload or property-set request fails, the job stops and emits neither `batch_url` nor `upload_urls`; files already uploaded are not rolled back.
 - Network or HTTP errors fail the job. File uploads require HTTP 2xx; property updates require HTTP 204 specifically, including when another 2xx response is returned. curl is configured for 3 retries, but not every error is retried.
-- Artifactory accepts repeated property updates. Rerunning the workflow uploads the same URL again and overwrites existing properties, subject to repository permissions.
+- The same caller repository, `version`, and filename resolve to the same URL across different runs or re-attempts; depending on repository permissions, later uploads may overwrite the existing file and its properties (including `run_id` and `run_attempt`), and separate copies are no longer kept per run number.
 - Empty or malformed publishing credentials also fail the job before any request is sent.
 
 ## Local Tests

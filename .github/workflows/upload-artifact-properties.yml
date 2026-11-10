@@ -1,11 +1,11 @@
 name: Reusable Upload Artifact Properties
 
 # Upload every regular file in the caller-provided Actions artifact to:
-#   https://pkg.flytiger-eco.com/artifactory/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}
+#   https://pkg.flytiger-eco.com/artifactory/github_generic/nightly/{owner}/{repository}/{version}/{filename}
 # and then set the configured fields as Artifactory item properties via /api/storage.
 # The Artifactory base URL (including repository key) is fixed inside the upload script.
-# The branch, tag, commit, and log_url properties are derived from GitHub context in this workflow
-# and cannot be overridden by callers; the remaining properties come from inputs.
+# The branch, tag, commit, log_url, run_id, and run_attempt properties are derived from GitHub context
+# in this workflow and cannot be overridden by callers; the remaining properties come from inputs.
 on:
   workflow_call:
     inputs:
@@ -14,7 +14,7 @@ on:
         required: true
         type: string
       version:
-        description: 'Version path segment placed after run_id_run_attempt in the upload URL; may differ from the package_version property when the release layout uses a different grouping'
+        description: 'Version path segment placed after the caller owner and repository in the upload URL; may differ from the package_version property'
         required: true
         type: string
       package_type:

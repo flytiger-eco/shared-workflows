@@ -2,7 +2,7 @@
 
 The destination layout is:
 
-    https://pkg.flytiger-eco.com/artifactory/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}
+    https://pkg.flytiger-eco.com/artifactory/github_generic/nightly/{owner}/{repository}/{version}/{filename}
 
 The base URL (including the repository key) is fixed here rather than passed as a
 workflow input so callers cannot redirect uploads and property writes to an
@@ -24,6 +24,7 @@ from urllib.parse import quote
 
 ARTIFACTORY_URL = "https://pkg.flytiger-eco.com/artifactory"
 ARTIFACTORY_REPOSITORY = "github_generic"
+ARTIFACTORY_PATH_PREFIX = "nightly"
 ARTIFACTORY_BASE_URL = f"{ARTIFACTORY_URL}/{ARTIFACTORY_REPOSITORY}"
 PROPERTY_KEYS = (
     "package_type",
@@ -39,6 +40,8 @@ PROPERTY_KEYS = (
     "tag",
     "commit",
     "log_url",
+    "run_id",
+    "run_attempt",
     "extra_info",
 )
 # Properties derived from the GitHub Actions context in the wrapper workflow (via env)
@@ -49,6 +52,8 @@ CONTEXT_PROPERTY_ENV = {
     "tag": "GITHUB_TAG",
     "commit": "GITHUB_SHA",
     "log_url": "GITHUB_LOG_URL",
+    "run_id": "GITHUB_RUN_ID",
+    "run_attempt": "GITHUB_RUN_ATTEMPT",
 }
 # Fields that must be present for the uploaded artifact to be identifiable. Optional
 # metadata (torch_version, branch, tag, extra_info) is still sent as an empty property.
@@ -63,6 +68,8 @@ REQUIRED_PROPERTY_KEYS = frozenset({
     "package_edition",
     "commit",
     "log_url",
+    "run_id",
+    "run_attempt",
 })
 
 SEGMENT_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._+\-]{0,254}"
@@ -123,6 +130,8 @@ def build_property_query(inputs, env):
             raise ValueError(f"{key} must be a string")
         if key in REQUIRED_PROPERTY_KEYS and not value:
             raise ValueError(f"{key} must not be empty")
+        if key in ("run_id", "run_attempt") and not re.fullmatch(POSITIVE_INT_PATTERN, value):
+            raise ValueError(f"{CONTEXT_PROPERTY_ENV[key]} must be a positive integer")
         # Escape Artifactory's value separators before URL encoding; percent-encoding
         # alone does not protect them after the server decodes the query values.
         escaped_value = re.sub(r"([\\,|=])", r"\\\1", value)
@@ -137,17 +146,16 @@ def validate_credentials(username, token):
         raise ValueError("Invalid publishing credential format")
 
 
-def build_context(inputs, run_id, run_attempt, github_repository):
+def build_context(inputs, github_repository):
     repository_match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)", github_repository)
     if repository_match is None or repository_match.group(2) in (".", ".."):
         raise ValueError("GITHUB_REPOSITORY must be in owner/repository format without path traversal")
     owner, repository = repository_match.groups()
     version = validate_segment("version", string_input(inputs, "version"), SEGMENT_PATTERN)
-    if not re.fullmatch(POSITIVE_INT_PATTERN, run_id):
-        raise ValueError("GITHUB_RUN_ID must be a positive integer")
-    if not re.fullmatch(POSITIVE_INT_PATTERN, run_attempt):
-        raise ValueError("GITHUB_RUN_ATTEMPT must be a positive integer")
-    return "/".join(quote(part, safe="") for part in (owner, repository, f"{run_id}_{run_attempt}", version))
+    return "/".join(
+        quote(part, safe="")
+        for part in (ARTIFACTORY_PATH_PREFIX, owner, repository, version)
+    )
 
 
 def _run_curl(extra_args, request_timeout, expected_status=None):
@@ -224,12 +232,7 @@ def main():
             raise ValueError("INPUTS_JSON must be a JSON object") from None
         if not isinstance(inputs, dict):
             raise ValueError("INPUTS_JSON must be a JSON object")
-        encoded_prefix = build_context(
-            inputs,
-            os.environ.get("GITHUB_RUN_ID", ""),
-            os.environ.get("GITHUB_RUN_ATTEMPT", ""),
-            os.environ.get("GITHUB_REPOSITORY", ""),
-        )
+        encoded_prefix = build_context(inputs, os.environ.get("GITHUB_REPOSITORY", ""))
         property_query = build_property_query(inputs, os.environ)
         username = os.environ.get("RELEASE_USERNAME", "")
         token = os.environ.get("RELEASE_TOKEN", "")

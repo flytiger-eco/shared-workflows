@@ -19,15 +19,15 @@ SCRIPT = ROOT / "scripts/upload_artifact.py"
 WORKFLOW = ROOT.parents[1] / ".github/workflows/upload-artifact-properties.yml"
 DEMO = ROOT / "workflows/demo-upload-artifact-properties.yml"
 
-BASE_URL = "https://pkg.flytiger-eco.com/artifactory/github_generic"
+BASE_URL = "https://pkg.flytiger-eco.com/artifactory/github_generic/nightly"
 RUN_ID = "100"
 RUN_ATTEMPT = "1"
 CALLER_REPOSITORY = "caller-org/demo-repo"
 VERSION = "1.2.3"
-UPLOAD_DIR = f"{BASE_URL}/{CALLER_REPOSITORY}/{RUN_ID}_{RUN_ATTEMPT}/{VERSION}/"
+UPLOAD_DIR = f"{BASE_URL}/{CALLER_REPOSITORY}/{VERSION}/"
 STORAGE_DIR = (
-    "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/"
-    f"{CALLER_REPOSITORY}/{RUN_ID}_{RUN_ATTEMPT}/{VERSION}/"
+    "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/"
+    f"{CALLER_REPOSITORY}/{VERSION}/"
 )
 DEMO_FILENAME = "demo.txt"
 
@@ -51,19 +51,23 @@ DEFAULT_CONTEXT_ENV = {
     "GITHUB_TAG": "",
     "GITHUB_SHA": "abcdef1234567890",
     "GITHUB_LOG_URL": "https://example.invalid/logs/100",
+    "GITHUB_RUN_ID": RUN_ID,
+    "GITHUB_RUN_ATTEMPT": RUN_ATTEMPT,
 }
 PROPERTY_ORDER = (
     "package_type", "package_name", "package_version", "os", "python_version",
     "runtime", "torch_version", "sdk_version", "package_edition", "branch",
-    "tag", "commit", "log_url", "extra_info",
+    "tag", "commit", "log_url", "run_id", "run_attempt", "extra_info",
 )
-CONTEXT_SOURCED_PROPERTIES = ("branch", "tag", "commit", "log_url")
+CONTEXT_SOURCED_PROPERTIES = ("branch", "tag", "commit", "log_url", "run_id", "run_attempt")
 INPUT_SOURCED_PROPERTIES = tuple(k for k in PROPERTY_ORDER if k not in CONTEXT_SOURCED_PROPERTIES)
 CONTEXT_PROPERTY_ENV = {
     "branch": "GITHUB_BRANCH",
     "tag": "GITHUB_TAG",
     "commit": "GITHUB_SHA",
     "log_url": "GITHUB_LOG_URL",
+    "run_id": "GITHUB_RUN_ID",
+    "run_attempt": "GITHUB_RUN_ATTEMPT",
 }
 
 
@@ -105,7 +109,7 @@ def make_file(workspace):
 def run_upload(uploader, workspace, monkeypatch):
     def respond(args, **kwargs):
         url, source = _last_curl_flags(args)
-        if url.startswith("https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/"):
+        if url.startswith("https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/"):
             assert source == os.devnull
             assert url.endswith("&recursive=0")
             _query_pairs(url)
@@ -120,8 +124,6 @@ def run_upload(uploader, workspace, monkeypatch):
     def run(inputs=None, **environment):
         env = {
             "ARTIFACT_DIR": str(workspace / "artifact"),
-            "GITHUB_RUN_ID": RUN_ID,
-            "GITHUB_RUN_ATTEMPT": RUN_ATTEMPT,
             "GITHUB_REPOSITORY": CALLER_REPOSITORY,
             "INPUTS_JSON": json.dumps(DEFAULT_INPUTS if inputs is None else inputs),
             "RELEASE_USERNAME": "test-user",
@@ -215,7 +217,7 @@ def test_property_query_matches_artifactory_wire_format(uploader):
         "os=ubuntu24.04;python_version=3.12;runtime=13.0.0;torch_version=;"
         "sdk_version=2.2.0;package_edition=standard;branch=main;tag=;"
         "commit=abcdef1234567890;log_url=https%3A%2F%2Fexample.invalid%2Flogs%2F100;"
-        "extra_info="
+        "run_id=100;run_attempt=1;extra_info="
     )
 
 
@@ -247,34 +249,45 @@ def test_reported_run_targets_the_existing_artifact(make_file, run_upload):
     upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
     storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
     assert upload_url == (
-        "https://pkg.flytiger-eco.com/artifactory/github_generic/caller-org/demo-repo/42607174840_1/test0001/demo.txt"
+        "https://pkg.flytiger-eco.com/artifactory/github_generic/nightly/caller-org/demo-repo/test0001/demo.txt"
     )
     assert storage_url.partition("?")[0] == (
-        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/"
-        "caller-org/demo-repo/42607174840_1/test0001/demo.txt"
+        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/"
+        "caller-org/demo-repo/test0001/demo.txt"
     )
     assert "github_generic/api/storage/" not in storage_url
-    assert _query_pairs(storage_url) == expected_property_values()
+    assert "github_generic/nightly/api/storage/" not in storage_url
+    assert _query_pairs(storage_url) == dict(expected_property_values(), run_id="42607174840")
 
 
 @pytest.mark.parametrize("repository", ["another-org/My_Repo.v2", "alice/.github", "team/_tools"])
+@pytest.mark.parametrize("run_id", ["100", "200"])
 @pytest.mark.parametrize("attempt", ["1", "2"])
-def test_caller_repository_and_attempt_define_both_paths(repository, attempt, make_file, run_upload, workspace):
+def test_run_metadata_changes_properties_without_changing_paths(
+    repository, run_id, attempt, make_file, run_upload, workspace,
+):
     make_file()
     code, transport = run_upload(
         inputs=dict(DEFAULT_INPUTS, template_repository="template-org/template-tools"),
         GITHUB_REPOSITORY=repository,
+        GITHUB_RUN_ID=run_id,
         GITHUB_RUN_ATTEMPT=attempt,
     )
     assert code == 0
-    prefix = f"{repository}/100_{attempt}/1.2.3/"
+    prefix = f"{repository}/1.2.3/"
     upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
     storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
     assert upload_url == f"{BASE_URL}/{prefix}demo.txt"
     assert storage_url.partition("?")[0] == (
-        f"https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/{prefix}demo.txt"
+        f"https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/{prefix}demo.txt"
     )
-    assert (workspace / "outputs").read_text().startswith(f"batch_url={BASE_URL}/{prefix}\n")
+    assert _query_pairs(storage_url) == dict(
+        expected_property_values(), run_id=run_id, run_attempt=attempt,
+    )
+    assert (workspace / "outputs").read_text() == (
+        f"batch_url={BASE_URL}/{prefix}\nupload_urls<<UPLOAD_URLS_EOF\n"
+        f"{upload_url}\nUPLOAD_URLS_EOF\n"
+    )
 
 
 @pytest.mark.parametrize("repository", [
@@ -320,6 +333,7 @@ def test_multiple_files_upload_sequentially(make_file, run_upload):
         assert upload_url == UPLOAD_DIR + path.name
         assert upload_source == str(path)
         assert storage_url.startswith(STORAGE_DIR + path.name + "?properties=")
+        assert _query_pairs(storage_url) == expected_property_values()
 
 
 def test_duplicate_basenames_both_upload_to_the_same_destination(make_file, run_upload):
@@ -373,7 +387,7 @@ def test_missing_required_input_property_stops_before_upload(key, make_file, run
     transport.assert_not_called()
 
 
-@pytest.mark.parametrize("key", ["commit", "log_url"])
+@pytest.mark.parametrize("key", ["commit", "log_url", "run_id", "run_attempt"])
 def test_missing_required_context_property_stops_before_upload(key, make_file, run_upload):
     make_file()
     code, transport = run_upload(**{CONTEXT_PROPERTY_ENV[key]: ""})
@@ -382,9 +396,12 @@ def test_missing_required_context_property_stops_before_upload(key, make_file, r
 
 
 def test_context_derived_inputs_are_ignored_even_when_present(make_file, run_upload):
-    # Callers must not be able to spoof branch/tag/commit/log_url through INPUTS_JSON.
+    # Callers must not be able to spoof context-derived properties, including run_id and run_attempt, through INPUTS_JSON.
     make_file()
-    inputs = dict(DEFAULT_INPUTS, branch="evil", tag="evil", commit="evil", log_url="https://evil.invalid")
+    inputs = dict(
+        DEFAULT_INPUTS, branch="evil", tag="evil", commit="evil", log_url="https://evil.invalid",
+        run_id="999999", run_attempt="999",
+    )
     code, transport = run_upload(inputs=inputs)
     assert code == 0
     storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
@@ -394,9 +411,25 @@ def test_context_derived_inputs_are_ignored_even_when_present(make_file, run_upl
         assert pairs[key] == expected[key], key
 
 
+@pytest.mark.parametrize("key", ["run_id", "run_attempt"])
+@pytest.mark.parametrize("value", ["", "0", "-1", "abc", "1.5", "01", " 1", "1\n", "1;tag=evil"])
+def test_invalid_run_metadata_stops_before_any_request(key, value, make_file, run_upload, workspace):
+    make_file()
+    code, transport = run_upload(**{CONTEXT_PROPERTY_ENV[key]: value})
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+
+
+@pytest.mark.parametrize("key", ["run_id", "run_attempt"])
+def test_run_properties_require_context_even_with_input_fallback(key, uploader):
+    env = dict(DEFAULT_CONTEXT_ENV)
+    del env[CONTEXT_PROPERTY_ENV[key]]
+    with pytest.raises(ValueError, match=f"{key} must not be empty"):
+        uploader.build_property_query(dict(DEFAULT_INPUTS, **{key: "123"}), env)
+
+
 @pytest.mark.parametrize("environment", [
-    {"GITHUB_RUN_ID": ""}, {"GITHUB_RUN_ID": "0"}, {"GITHUB_RUN_ID": "abc"},
-    {"GITHUB_RUN_ATTEMPT": ""}, {"GITHUB_RUN_ATTEMPT": "-1"},
     {"INPUTS_JSON": "{"}, {"INPUTS_JSON": "[]"},
     {"ARTIFACT_DIR": ""},
 ])
@@ -629,12 +662,13 @@ def test_readme_documents_interface_and_local_links():
         assert f"]({relative})" in text
         assert (ROOT / relative).is_file()
     assert (
-        "https://pkg.flytiger-eco.com/artifactory/github_generic/"
-        "{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}"
+        "https://pkg.flytiger-eco.com/artifactory/github_generic/nightly/"
+        "{owner}/{repository}/{version}/{filename}"
     ) in text
     assert (
-        "/api/storage/github_generic/{owner}/{repository}/{run_id}_{run_attempt}/{version}/{filename}"
+        "/api/storage/github_generic/nightly/{owner}/{repository}/{version}/{filename}"
     ) in text
+    assert "{run_id}_{run_attempt}" not in text
     assert "GITHUB_REPOSITORY" in text
     assert "{repository_id}" not in text and "{artifact_base_url}" not in text
     assert "/api/storage" in text and "properties=" in text
