@@ -4,9 +4,6 @@ name: Demo Upload Artifact Properties
 # Manual runs actually PUT files to Artifactory and set the properties; run only on trusted branches.
 # Replace the build job with your own packaging step and adapt the property inputs to the released artifact.
 on:
-  schedule:
-    # Run once every hour (UTC). Scheduled workflows are only enabled on the default branch.
-    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       version:
@@ -38,7 +35,7 @@ on:
         description: 'Artifactory item property: Python version'
         required: false
         type: string
-        default: 'py312'
+        default: '312'
       runtime:
         description: 'Artifactory item property: runtime version'
         required: false
@@ -82,24 +79,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # For scheduled runs there is no workflow input, so the version segment falls back to
-      # the UTC run timestamp; manual runs may still override it with the version input.
-      - name: Resolve version segment
-        id: version
-        shell: bash
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [ -n "$INPUT_VERSION" ]; then
-            version="$INPUT_VERSION"
-          else
-            version="$(date -u '+%Y%m%dT%H%M%SZ')"
-          fi
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-
-      # Replace this example with your real build command; every regular file inside
-      # the staged directory is uploaded unchanged.
+      # Replace with the actual build command; the template uploads the whole ZIP saved by Actions directly.
       - name: Stage files for upload
         shell: bash
         run: |
@@ -123,7 +103,7 @@ jobs:
     uses: flytiger-eco/shared-workflows/.github/workflows/upload-artifact-properties.yml@main
     with:
       artifact_name: ${{ needs.build.outputs.artifact_name }}
-      version: ${{ needs.build.outputs.version }}
+      # version: ${{ needs.build.outputs.version }}
       package_type: ${{ inputs.package_type || 'pypi' }}
       package_name: ${{ inputs.package_name || 'test_package' }}
       package_version: ${{ inputs.package_version || '0.1.0' }}

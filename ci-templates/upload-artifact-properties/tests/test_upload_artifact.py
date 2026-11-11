@@ -1,6 +1,7 @@
 """Offline tests for the upload artifact properties template; curl requests are mocked and never reach Artifactory."""
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import sys
 import tempfile
 from unittest.mock import Mock
 from urllib.parse import unquote
+import zipfile
 
 import pytest
 import yaml
@@ -38,6 +40,7 @@ DEFAULT_INPUTS = {
     "package_version": VERSION,
     "os": "ubuntu24.04",
     "python_version": "3.12",
+    "runtime_type": "cuda",
     "runtime": "13.0.0",
     "torch_version": "",
     "sdk_version": "2.2.0",
@@ -55,12 +58,14 @@ DEFAULT_CONTEXT_ENV = {
     "GITHUB_RUN_ATTEMPT": RUN_ATTEMPT,
 }
 PROPERTY_ORDER = (
-    "package_type", "package_name", "package_version", "os", "python_version",
-    "runtime", "torch_version", "sdk_version", "package_edition", "branch",
+    "package_type", "package_name", "package_version", "version", "os", "python_version",
+    "runtime_type", "runtime", "torch_version", "sdk_version", "package_edition", "branch",
     "tag", "commit", "log_url", "run_id", "run_attempt", "extra_info",
 )
 CONTEXT_SOURCED_PROPERTIES = ("branch", "tag", "commit", "log_url", "run_id", "run_attempt")
-INPUT_SOURCED_PROPERTIES = tuple(k for k in PROPERTY_ORDER if k not in CONTEXT_SOURCED_PROPERTIES)
+INPUT_SOURCED_PROPERTIES = tuple(
+    k for k in PROPERTY_ORDER if k not in (*CONTEXT_SOURCED_PROPERTIES, "version")
+)
 CONTEXT_PROPERTY_ENV = {
     "branch": "GITHUB_BRANCH",
     "tag": "GITHUB_TAG",
@@ -138,6 +143,42 @@ def run_upload(uploader, workspace, monkeypatch):
     return run
 
 
+@pytest.fixture
+def artifact_zip_bytes():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("nested/demo.txt", b"original payload")
+        archive.writestr("binary.dat", bytes(range(256)))
+        archive.writestr("../outside.txt", b"must never be extracted")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("version", ["custom", ""])
+@pytest.mark.parametrize("filename", ["bundle.zip", "artifact"])
+def test_downloaded_zip_is_uploaded_without_extraction_or_renaming(
+    version, filename, make_file, run_upload, artifact_zip_bytes, workspace,
+):
+    archive = make_file(filename=filename, content=artifact_zip_bytes)
+    code, uploads = run_upload(inputs=dict(DEFAULT_INPUTS, version=version))
+    assert code == 0
+    assert uploads.call_count == 2
+    upload_url, source = _last_curl_flags(_curl_args(uploads)[0])
+    storage_url, _ = _last_curl_flags(_curl_args(uploads)[1])
+    expected_version = version or "1.2.3+abcdef1.ppu2.2.0"
+    encoded = expected_version.replace("+", "%2B")
+    assert upload_url == f"{BASE_URL}/{CALLER_REPOSITORY}/{encoded}/{filename}"
+    assert source == str(archive)
+    assert storage_url.partition("?")[0] == (
+        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/"
+        f"{CALLER_REPOSITORY}/{encoded}/{filename}"
+    )
+    assert _query_pairs(storage_url) == dict(expected_property_values(), version=expected_version)
+    assert archive.read_bytes() == artifact_zip_bytes
+    assert list((workspace / "artifact").iterdir()) == [archive]
+    assert not (workspace / "outside.txt").exists()
+    assert "demo.txt" not in (workspace / "outputs").read_text()
+
+
 def _curl_args(transport):
     return [call.args[0] for call in transport.call_args_list]
 
@@ -211,10 +252,157 @@ def test_property_query_carries_every_configured_field(make_file, run_upload):
         assert pairs[key] == expected[key], key
 
 
+@pytest.mark.parametrize("version", [VERSION, ""])
+@pytest.mark.parametrize("override,expected", [
+    ({}, "cuda"),
+    ({"runtime_type": None}, "cuda"),
+    ({"runtime_type": "cuda"}, "cuda"),
+    ({"runtime_type": "rocm"}, "rocm"),
+    ({"runtime_type": "cpu"}, "cpu"),
+    ({"runtime_type": "CUDA"}, "CUDA"),
+    ({"runtime_type": ""}, ""),
+    ({"runtime_type": "custom;x=y,z|w&recursive=1"}, "custom;x=y,z|w&recursive=1"),
+])
+def test_runtime_type_default_and_override_only_change_zip_property(
+    version, override, expected, make_file, run_upload, artifact_zip_bytes, workspace,
+):
+    archive = make_file(filename="bundle.zip", content=artifact_zip_bytes)
+    inputs = dict(DEFAULT_INPUTS, version=version)
+    del inputs["runtime_type"]
+    inputs.update(override)
+    code, transport = run_upload(inputs=inputs)
+    assert code == 0
+    assert transport.call_count == 2
+    upload_url, source = _last_curl_flags(_curl_args(transport)[0])
+    storage_url, _ = _last_curl_flags(_curl_args(transport)[1])
+    expected_version = version or "1.2.3+abcdef1.ppu2.2.0"
+    encoded = expected_version.replace("+", "%2B")
+    batch_url = f"{BASE_URL}/{CALLER_REPOSITORY}/{encoded}/"
+    assert upload_url == batch_url + "bundle.zip"
+    assert source == str(archive)
+    assert storage_url.partition("?")[0] == (
+        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/"
+        f"{CALLER_REPOSITORY}/{encoded}/bundle.zip"
+    )
+    assert _query_pairs(storage_url) == dict(
+        expected_property_values(), runtime_type=expected, version=expected_version,
+    )
+    assert archive.read_bytes() == artifact_zip_bytes
+    assert (workspace / "outputs").read_text() == (
+        f"batch_url={batch_url}\nupload_urls<<UPLOAD_URLS_EOF\n{upload_url}\nUPLOAD_URLS_EOF\n"
+    )
+
+
+@pytest.mark.parametrize("value", [123, False, [], {}])
+def test_non_string_runtime_type_stops_before_upload(value, make_file, run_upload, workspace, capsys):
+    make_file()
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, runtime_type=value))
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+    assert "runtime_type must be a string" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("version,encoded", [
+    ("custom-v2", "custom-v2"),
+    ("1.0.0+custom", "1.0.0%2Bcustom"),
+    ("0", "0"),
+])
+def test_explicit_version_is_shared_by_paths_properties_and_outputs(
+    version, encoded, make_file, run_upload, workspace,
+):
+    make_file()
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, version=version))
+    assert code == 0
+    upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    batch_url = f"{BASE_URL}/{CALLER_REPOSITORY}/{encoded}/"
+    assert upload_url == batch_url + DEMO_FILENAME
+    assert storage_url.partition("?")[0] == (
+        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/"
+        f"{CALLER_REPOSITORY}/{encoded}/{DEMO_FILENAME}"
+    )
+    assert _query_pairs(storage_url) == dict(expected_property_values(), version=version)
+    assert f";version={encoded};" in storage_url
+    assert (workspace / "outputs").read_text() == (
+        f"batch_url={batch_url}\nupload_urls<<UPLOAD_URLS_EOF\n{upload_url}\nUPLOAD_URLS_EOF\n"
+    )
+
+
+@pytest.mark.parametrize("override", [{}, {"version": ""}, {"version": None}])
+@pytest.mark.parametrize("package_version,sdk_version,sha,expected,encoded", [
+    ("1.2.3", "2.2.0", "abcdef1234567890", "1.2.3+abcdef1.ppu2.2.0", "1.2.3%2Babcdef1.ppu2.2.0"),
+    ("2.0.0rc1", "3.0.1", "1234567890abcdef", "2.0.0rc1+1234567.ppu3.0.1", "2.0.0rc1%2B1234567.ppu3.0.1"),
+])
+def test_default_version_is_shared_by_all_files_paths_properties_and_outputs(
+    override, package_version, sdk_version, sha, expected, encoded, make_file, run_upload, workspace,
+):
+    for name in ("a.txt", "b.txt"):
+        make_file(filename=name)
+    inputs = dict(DEFAULT_INPUTS, package_version=package_version, sdk_version=sdk_version,
+                  commit="fake", short_commit="fake", template_ref="another-template-ref")
+    del inputs["version"]
+    inputs.update(override)
+    code, transport = run_upload(inputs=inputs, GITHUB_SHA=sha)
+    assert code == 0
+    assert transport.call_count == 4
+    batch_url = f"{BASE_URL}/{CALLER_REPOSITORY}/{encoded}/"
+    for index, name in enumerate(("a.txt", "b.txt")):
+        upload_url = _last_curl_flags(_curl_args(transport)[index * 2])[0]
+        storage_url = _last_curl_flags(_curl_args(transport)[index * 2 + 1])[0]
+        assert upload_url == batch_url + name
+        assert storage_url.partition("?")[0] == (
+            "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/"
+            f"{CALLER_REPOSITORY}/{encoded}/{name}"
+        )
+        assert _query_pairs(storage_url) == dict(
+            expected_property_values(), version=expected, package_version=package_version,
+            sdk_version=sdk_version, commit=sha,
+        )
+        assert f";version={encoded};" in storage_url
+    assert (workspace / "outputs").read_text() == (
+        f"batch_url={batch_url}\nupload_urls<<UPLOAD_URLS_EOF\n"
+        f"{batch_url}a.txt\n{batch_url}b.txt\nUPLOAD_URLS_EOF\n"
+    )
+
+
+@pytest.mark.parametrize("key", ["package_version", "sdk_version"])
+@pytest.mark.parametrize("value", [None, "", " ", "../other", "v1/other", "v1?x=1", 123, "v" * 250])
+def test_invalid_default_version_components_stop_before_upload(key, value, make_file, run_upload, workspace):
+    make_file()
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, version="", **{key: value}))
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+
+
+@pytest.mark.parametrize("key", ["package_version", "sdk_version"])
+def test_missing_default_version_component_stops_before_upload(key, make_file, run_upload):
+    make_file()
+    inputs = dict(DEFAULT_INPUTS, version="")
+    del inputs[key]
+    code, transport = run_upload(inputs=inputs)
+    assert code == 1
+    transport.assert_not_called()
+
+
+@pytest.mark.parametrize("sha", ["", "123456", "not-hex", "abcdef1/other", "abcdef1\n"])
+def test_invalid_default_commit_stops_before_upload(sha, make_file, run_upload, workspace):
+    make_file()
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, version=""), GITHUB_SHA=sha)
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+
+
+def test_explicit_version_does_not_require_fallback_components(uploader):
+    assert uploader.resolve_version({"version": "custom"}, {}) == "custom"
+
+
 def test_property_query_matches_artifactory_wire_format(uploader):
     assert uploader.build_property_query(DEFAULT_INPUTS, DEFAULT_CONTEXT_ENV) == (
-        "properties=package_type=raw;package_name=demo_package;package_version=1.2.3;"
-        "os=ubuntu24.04;python_version=3.12;runtime=13.0.0;torch_version=;"
+        "properties=package_type=raw;package_name=demo_package;package_version=1.2.3;version=1.2.3;"
+        "os=ubuntu24.04;python_version=3.12;runtime_type=cuda;runtime=13.0.0;torch_version=;"
         "sdk_version=2.2.0;package_edition=standard;branch=main;tag=;"
         "commit=abcdef1234567890;log_url=https%3A%2F%2Fexample.invalid%2Flogs%2F100;"
         "run_id=100;run_attempt=1;extra_info="
@@ -257,7 +445,9 @@ def test_reported_run_targets_the_existing_artifact(make_file, run_upload):
     )
     assert "github_generic/api/storage/" not in storage_url
     assert "github_generic/nightly/api/storage/" not in storage_url
-    assert _query_pairs(storage_url) == dict(expected_property_values(), run_id="42607174840")
+    assert _query_pairs(storage_url) == dict(
+        expected_property_values(), version="test0001", run_id="42607174840",
+    )
 
 
 @pytest.mark.parametrize("repository", ["another-org/My_Repo.v2", "alice/.github", "team/_tools"])
@@ -350,8 +540,15 @@ def test_duplicate_basenames_both_upload_to_the_same_destination(make_file, run_
 
 @pytest.mark.parametrize("key,value", [
     ("version", "two/three"),
-    ("version", ""),
+    ("version", " "),
     ("version", "$(touch marker)"),
+    ("version", "../other"),
+    ("version", "v1?x=1"),
+    ("version", "v1;tag=other"),
+    ("version", "v" * 256),
+    ("version", 123),
+    ("version", False),
+    ("version", []),
 ])
 def test_invalid_url_inputs_rejected_before_any_request(key, value, make_file, run_upload, workspace):
     make_file()
@@ -541,10 +738,15 @@ def test_workflow_contract_and_step_order():
         *INPUT_SOURCED_PROPERTIES, "template_repository", "template_ref",
     }
     assert set(contract["inputs"]) == expected_inputs
-    for name in ("artifact_name", "version", "template_ref"):
+    for name in ("artifact_name", "template_ref"):
         assert contract["inputs"][name]["required"] == "true", name
+    assert contract["inputs"]["version"]["required"] == "false"
+    assert contract["inputs"]["version"]["default"] == ""
+    assert contract["inputs"]["runtime_type"]["required"] == "false"
+    assert contract["inputs"]["runtime_type"]["type"] == "string"
+    assert contract["inputs"]["runtime_type"]["default"] == "cuda"
     for name in INPUT_SOURCED_PROPERTIES:
-        if name != "extra_info":
+        if name not in ("extra_info", "runtime_type"):
             assert contract["inputs"][name]["required"] == "true", name
     for name in CONTEXT_SOURCED_PROPERTIES:
         assert name not in contract["inputs"], name
@@ -566,9 +768,17 @@ def test_workflow_contract_and_step_order():
         "persist-credentials": "false",
     }
     assert setup["with"]["python-version"] == "3.12"
-    assert download["uses"] == "actions/download-artifact@v4"
-    assert download["with"]["name"] == "${{ inputs.artifact_name }}"
+    assert download["uses"] == "actions/download-artifact@v8"
+    assert download["with"] == {
+        "name": "${{ inputs.artifact_name }}",
+        "path": "${{ runner.temp }}/upload-artifact-properties-source",
+        "skip-decompress": "true",
+    }
+    assert "run" not in download and "env" not in download
     assert upload["env"]["ARTIFACT_DIR"] == download["with"]["path"]
+    assert "if" not in upload
+    assert "--download" not in SCRIPT.read_text()
+    assert "def download_artifact" not in SCRIPT.read_text()
     assert upload["env"]["GITHUB_RUN_ID"] == "${{ github.run_id }}"
     assert upload["env"]["GITHUB_RUN_ATTEMPT"] == "${{ github.run_attempt }}"
     assert upload["env"]["GITHUB_REPOSITORY"] == "${{ github.repository }}"
@@ -594,24 +804,36 @@ def test_workflow_contract_and_step_order():
         assert "${{" not in step.get("run", "")
         if step is not upload:
             assert "RELEASE_TOKEN" not in str(step.get("env", {}))
-    passed = subprocess.run(["bash", "-c", guard["run"]],
-                            env=dict(os.environ, ARTIFACT_NAME="x", VERSION="1.0.0"),
-                            capture_output=True, text=True, timeout=5)
-    assert passed.returncode == 0, passed.stderr
-    for name in ("ARTIFACT_NAME", "VERSION"):
-        env = {"ARTIFACT_NAME": "x", "VERSION": "1.0.0"}
-        env[name] = " "
+        assert "GH_TOKEN" not in step.get("env", {})
+        assert "GH_ENTERPRISE_TOKEN" not in step.get("env", {})
+        assert "GITHUB_API_URL" not in step.get("env", {})
+    assert guard["env"] == {"ARTIFACT_NAME": "${{ inputs.artifact_name }}"}
+    for version in (None, "", "1.0.0"):
+        env = dict(os.environ, ARTIFACT_NAME="x")
+        env.pop("VERSION", None)
+        if version is not None:
+            env["VERSION"] = version
+        passed = subprocess.run(["bash", "-c", guard["run"]], env=env,
+                                capture_output=True, text=True, timeout=5)
+        assert passed.returncode == 0, passed.stderr
+    for artifact_name in ("", " "):
         failed = subprocess.run(["bash", "-c", guard["run"]],
-                                env=dict(os.environ, **env),
+                                env=dict(os.environ, ARTIFACT_NAME=artifact_name),
                                 capture_output=True, text=True, timeout=5)
         assert failed.returncode == 1
-        assert name.lower() in failed.stderr
+        assert "artifact_name" in failed.stderr
 
 
 def test_demo_workflow_matches_template_contract():
     template = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     demo = yaml.load(DEMO.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     assert set(demo["on"]) == {"workflow_dispatch"}
+    assert demo["on"]["workflow_dispatch"]["inputs"]["version"]["required"] == "false"
+    assert demo["on"]["workflow_dispatch"]["inputs"]["version"]["default"] == ""
+    assert demo["jobs"]["publish"]["with"]["version"] == "${{ inputs.version }}"
+    assert demo["on"]["workflow_dispatch"]["inputs"]["runtime_type"]["required"] == "false"
+    assert demo["on"]["workflow_dispatch"]["inputs"]["runtime_type"]["default"] == "cuda"
+    assert demo["jobs"]["publish"]["with"]["runtime_type"] == "${{ inputs.runtime_type }}"
     assert demo["permissions"] == {"contents": "read"}
     build, publish, result = (demo["jobs"][name] for name in ("build", "publish", "result"))
     assert publish["needs"] == "build"
@@ -650,6 +872,11 @@ def test_demo_workflow_matches_template_contract():
                 assert checked.returncode == 0, checked.stderr
 
 
+def test_registered_demo_grants_required_actions_permissions():
+    demo = yaml.load((WORKFLOW.parent / "demo-upload-artifact-properties.yml").read_text(), Loader=yaml.BaseLoader)
+    assert demo["permissions"] == {"contents": "read"}
+
+
 def test_readme_documents_interface_and_local_links():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     contract = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)["on"]["workflow_call"]
@@ -672,6 +899,15 @@ def test_readme_documents_interface_and_local_links():
     assert "GITHUB_REPOSITORY" in text
     assert "{repository_id}" not in text and "{artifact_base_url}" not in text
     assert "/api/storage" in text and "properties=" in text
+    assert "| `version` | No |" in text
+    assert "{package_version}+{short_commit}.ppu{sdk_version}" in text
+    assert "1.2.3+abcdef1.ppu2.2.0" in text
+    assert "{artifact_name}.zip" in text
+    assert "contents: read" in text
+    assert "actions/download-artifact@v8" in text
+    assert "skip-decompress: true" in text
+    assert "gh api" not in text
+    assert "actions/download-artifact@v4" not in text
 
 
 def test_readme_documents_context_derived_property_source():

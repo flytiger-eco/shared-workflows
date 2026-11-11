@@ -1,6 +1,6 @@
 name: Reusable Upload Artifact Properties
 
-# Upload every regular file in the caller-provided Actions artifact to:
+# Upload the caller's raw Actions artifact ZIP as-is to:
 #   https://pkg.flytiger-eco.com/artifactory/github_generic/nightly/{owner}/{repository}/{version}/{filename}
 # and then set the configured fields as Artifactory item properties via /api/storage.
 # The Artifactory base URL (including repository key) is fixed inside the upload script.
@@ -14,9 +14,10 @@ on:
         required: true
         type: string
       version:
-        description: 'Version path segment placed after the caller owner and repository in the upload URL; may differ from the package_version property'
-        required: true
+        description: 'Version shared by the upload path and the same-named property; when empty, generated as {package_version}+{short_commit}.ppu{sdk_version}, where short_commit is the first 7 characters of the caller SHA'
+        required: false
         type: string
+        default: ''
       package_type:
         description: 'Artifactory item property: package type, such as wheel, sdist, docker, or raw'
         required: true
@@ -37,6 +38,11 @@ on:
         description: 'Artifactory item property: Python version, such as 3.12'
         required: true
         type: string
+      runtime_type:
+        description: 'Runtime type property; defaults to cuda when not provided and uses the given value as-is otherwise'
+        required: false
+        type: string
+        default: 'cuda'
       runtime:
         description: 'Artifactory item property: runtime version, such as CUDA 13.0.0'
         required: true
@@ -101,18 +107,12 @@ jobs:
         shell: bash
         env:
           ARTIFACT_NAME: ${{ inputs.artifact_name }}
-          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          for pair in "ARTIFACT_NAME:artifact_name" "VERSION:version"; do
-            env_name="${pair%%:*}"
-            input_name="${pair##*:}"
-            value="${!env_name}"
-            if [[ -z "${value//[[:space:]]/}" ]]; then
-              printf '%s\n' "::error::${input_name} must not be empty" >&2
-              exit 1
-            fi
-          done
+          if [[ -z "${ARTIFACT_NAME//[[:space:]]/}" ]]; then
+            printf '%s\n' "::error::artifact_name must not be empty" >&2
+            exit 1
+          fi
 
       - name: Check out template tools
         uses: actions/checkout@v4
@@ -128,12 +128,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Download only the named artifact from this run; download-artifact extracts it automatically.
-      - name: Download and extract artifact
-        uses: actions/download-artifact@v4
+      # Download the raw ZIP saved by GitHub without decompressing or repackaging it.
+      - name: Download artifact ZIP
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.artifact_name }}
           path: ${{ runner.temp }}/upload-artifact-properties-source
+          skip-decompress: true
 
       - name: Upload files and set Artifactory properties
         id: upload

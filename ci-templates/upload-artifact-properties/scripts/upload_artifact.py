@@ -1,4 +1,4 @@
-"""Upload every regular file in the artifact to Artifactory and set item properties.
+"""Upload the raw ZIP saved by the official download Action to Artifactory and set its Properties.
 
 The destination layout is:
 
@@ -30,8 +30,10 @@ PROPERTY_KEYS = (
     "package_type",
     "package_name",
     "package_version",
+    "version",
     "os",
     "python_version",
+    "runtime_type",
     "runtime",
     "torch_version",
     "sdk_version",
@@ -61,6 +63,7 @@ REQUIRED_PROPERTY_KEYS = frozenset({
     "package_type",
     "package_name",
     "package_version",
+    "version",
     "os",
     "python_version",
     "runtime",
@@ -96,6 +99,22 @@ def validate_segment(name, value, pattern):
     return value
 
 
+def resolve_version(inputs, env):
+    version = string_input(inputs, "version", "")
+    if not version:
+        package_version = validate_segment(
+            "package_version", string_input(inputs, "package_version"), SEGMENT_PATTERN,
+        )
+        sdk_version = validate_segment(
+            "sdk_version", string_input(inputs, "sdk_version"), SEGMENT_PATTERN,
+        )
+        commit = env.get("GITHUB_SHA", "")
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{7,}", commit):
+            raise ValueError("GITHUB_SHA must contain at least 7 hexadecimal characters to derive version")
+        version = f"{package_version}+{commit[:7]}.ppu{sdk_version}"
+    return validate_segment("version", version, SEGMENT_PATTERN)
+
+
 def find_files(root):
     if root.is_symlink() or not root.is_dir():
         raise ValueError("artifact directory does not exist or is not a regular directory")
@@ -122,6 +141,8 @@ def build_property_query(inputs, env):
     for key in PROPERTY_KEYS:
         if key in CONTEXT_PROPERTY_ENV:
             value = env.get(CONTEXT_PROPERTY_ENV[key], "")
+        elif key == "runtime_type":
+            value = string_input(inputs, key, "cuda")
         else:
             value = inputs.get(key, "")
             if value is None:
@@ -232,6 +253,7 @@ def main():
             raise ValueError("INPUTS_JSON must be a JSON object") from None
         if not isinstance(inputs, dict):
             raise ValueError("INPUTS_JSON must be a JSON object")
+        inputs["version"] = resolve_version(inputs, os.environ)
         encoded_prefix = build_context(inputs, os.environ.get("GITHUB_REPOSITORY", ""))
         property_query = build_property_query(inputs, os.environ)
         username = os.environ.get("RELEASE_USERNAME", "")

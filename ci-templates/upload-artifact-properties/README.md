@@ -1,6 +1,6 @@
 # Upload Artifact With Properties Template
 
-Download and extract the specified Actions artifact from the current GitHub Actions run, PUT every regular file inside it unchanged to a versioned Artifactory path, and set the configured fields as Artifactory item properties.
+Downloads the raw ZIP of a named artifact from the current GitHub Actions run, uploads the ZIP directly to a versioned Artifactory path, and sets Properties on the ZIP. The whole flow never unpacks, traverses, or repackages the ZIP contents.
 
 Upload destination:
 
@@ -10,7 +10,7 @@ https://pkg.flytiger-eco.com/artifactory/github_generic/nightly/{owner}/{reposit
 
 `owner` and `repository` come from the caller's `${{ github.repository }}`, passed to the script as `GITHUB_REPOSITORY` in `owner/repository` format. The owner is the organization name (or username for a personal repository), not the template repository owner. `run_id` and `run_attempt` come from `${{ github.run_id }}` and `${{ github.run_attempt }}`, are written only as the same-named properties, and no longer participate in the upload path. These values require no caller inputs; the path keeps the fixed `nightly` prefix plus the `version` and `filename` segments. The service root (`ARTIFACTORY_URL`) and repository key (`ARTIFACTORY_REPOSITORY`, fixed to `github_generic`) are defined inside [`scripts/upload_artifact.py`](scripts/upload_artifact.py). Together they form `ARTIFACTORY_BASE_URL`; neither is a workflow input.
 
-After each successful upload, the template sets properties on that same item with an empty-body PUT to:
+The raw ZIP filename comes from the `Content-Disposition` of the download response handled by the official Action and is usually `{artifact_name}.zip`; when no filename is provided, the Action falls back to its default name `artifact`. The upload script keeps the filename saved by the Action and never renames it. After a successful upload, the template sends a PUT with an empty request body for this ZIP artifact to set its Properties:
 
 ```text
 https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/{owner}/{repository}/{version}/{filename}?properties=key1=value1;key2=value2&recursive=0
@@ -30,14 +30,13 @@ This is a reusable workflow called through `jobs.<job_id>.uses`, not a regular A
 
 ```text
 Caller produces the artifact directory
-  → actions/upload-artifact@v4 saves it in the current run
-  → Call the template with needs on the producing job
-  → actions/download-artifact@v4 downloads and extracts the named artifact
-  → Recursively collect every regular file (symlinks are skipped, directory symlinks are not followed)
-  → For each file:
-      → HTTPS PUT to the versioned Artifactory path
-      → HTTPS PUT to /api/storage/...?properties=... to attach metadata
-  → Emit batch_url and upload_urls after all files succeed
+  → actions/upload-artifact@v4 saves the artifact for the current run
+  → caller invokes the template from a job that declares needs on the producing job
+  → actions/download-artifact@v8 downloads the current run's artifact by artifact_name
+  → skip-decompress: true keeps the raw ZIP without unpacking it
+  → HTTPS PUT uploads the ZIP to the versioned Artifactory path
+  → HTTPS PUT /api/storage/...?properties=... sets the properties on the ZIP
+  → on success, emits batch_url and upload_urls
 ```
 
 The reusable workflow runs in a separate job and does not share local files with the caller's previous job. Build outputs must be transferred through Actions artifacts. Nested ZIP or tar files inside the artifact are not unpacked.
@@ -47,8 +46,8 @@ The reusable workflow runs in a separate job and does not share local files with
 1. Copy [`workflows/demo-upload-artifact-properties.yml`](workflows/demo-upload-artifact-properties.yml) to `.github/workflows/demo-upload-artifact-properties.yml` in the project to publish.
 2. Configure `RELEASE_USERNAME` and `RELEASE_TOKEN` in the caller repository or organization Actions Secrets. The account needs PUT permission on both the destination path and on the item properties in the target Artifactory repository.
 3. Ensure the caller can use the template repository workflows. Private template repositories must also allow cross-repository calls in Actions settings; configure `TEMPLATE_TOKEN` and uncomment the corresponding example line as needed.
-4. Replace the demo staging step with your real build command. Every regular file inside the saved artifact directory is uploaded; if only a subset should be published, upload a filtered artifact.
-5. Configure `version` and the 10 property inputs listed below; `branch`, `tag`, `commit`, `log_url`, `run_id`, and `run_attempt` come automatically from GitHub context.
+4. Replace the example artifact-preparation step with the real build command. The whole Actions artifact ZIP is published as a single file; to publish only part of it, filter the files in the caller before the artifact is saved.
+5. Configure the property inputs below as needed; `runtime_type` is optional and defaults to `cuda` when not provided; `version` is optional and is generated automatically when omitted or when an empty string is passed. `branch`, `tag`, `commit`, `log_url`, `run_id`, and `run_attempt` come from the GitHub context automatically.
 6. After committing the example to the caller default branch, trigger it manually through **Run workflow** on the Actions page and select a trusted branch.
 
 The example actually uploads to Artifactory; it is not a dry run. Files under this directory's `workflows/` are provided for copying and are not automatically registered as Actions workflows in this repository.
@@ -62,7 +61,9 @@ The example uses the `main` branch of `flytiger-eco/shared-workflows`. Ensure th
 - When using a fork, update both the repository path in `uses` and `template_repository`.
 - For same-repository relative-path calls, use `uses: ./.github/workflows/upload-artifact-properties.yml` with `template_repository: ${{ github.repository }}` and `template_ref: ${{ github.sha }}`.
 
-The caller must grant at least `contents: read`. The template job uses `ubuntu-latest` and Python 3.12 with a 30-minute timeout. Its runner must reach `pkg.flytiger-eco.com` over HTTPS and download Actions artifacts. The upload script uses only the Python standard library and curl.
+The caller must grant `contents: read` to check out the template tools. The download uses the official `actions/download-artifact@v8` with `skip-decompress: true` enabled; downloading an artifact from the current run is authenticated automatically by the Action, so no explicit `github-token` is needed and no extra `actions: read` permission is required for the download. The template no longer depends on the GitHub CLI or a custom download script.
+
+The template runs on `ubuntu-latest` with Python 3.12 and a job timeout of 30 minutes. The official Actions run on Node.js 24, provided by the GitHub-hosted runner; the upload still uses only the Python standard library and curl. The runner must be able to reach the GitHub artifact service, the download storage URLs, and `pkg.flytiger-eco.com`. The official `download-artifact@v8` does not support GitHub Enterprise Server (GHES). Artifactory credentials are injected only in the upload step, and upload requests still do not follow redirects.
 
 ## Inputs
 
@@ -73,9 +74,17 @@ All inputs have type `string`.
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `artifact_name` | Yes | None | Name of the artifact saved by the caller using `actions/upload-artifact@v4`; must belong to the current workflow run. |
-| `version` | Yes | None | Version path segment placed after the caller organization and repository names; may differ from the `package_version` property. |
+| `version` | No | `{package_version}+{short_commit}.ppu{sdk_version}` | Used as-is when passed explicitly; generated when omitted or when an empty string is passed. The final value is used for both the upload path and the same-named Properties; `short_commit` is the first 7 characters of the caller's `GITHUB_SHA`. |
 | `template_repository` | No | `flytiger-eco/shared-workflows` | Repository containing the template script, in `owner/repo` format. |
 | `template_ref` | Yes | None | Template script version; must match the workflow version referenced by `uses`. |
+
+### Version Selection and Properties
+
+- When a non-empty `version` is passed explicitly, it is used as-is, without appending a commit number or SDK suffix.
+- When `version` is omitted or an empty string is passed, `{package_version}+{short_commit}.ppu{sdk_version}` is used. For example, with `package_version=1.2.3`, caller SHA `abcdef1234567890`, and `sdk_version=2.2.0`, the result is `1.2.3+abcdef1.ppu2.2.0`.
+- `short_commit` uses the first 7 characters of the caller's `${{ github.sha }}`, never the commit checked out by the template, and a same-named input cannot override it; when generating automatically, the SHA must be a hexadecimal string of at least 7 characters.
+- The final `version` is used for the upload URL, the Properties API path, and the `version` property. The `+` in the URL is encoded as `%2B`, while the property keeps the raw version value; the `package_version` property keeps the caller's original value.
+- Both explicit and auto-generated versions go through single-segment path validation: it must start with a letter or digit and may only contain letters, digits, dots, underscores, hyphens, and plus signs, with a total length of at most 255 characters. Whitespace-only or invalid explicit versions fail instead of silently falling back; during auto-generation, `package_version` and `sdk_version` must also satisfy the same single-segment validation.
 
 ### Property Inputs
 
@@ -88,6 +97,7 @@ Every field below is written as an Artifactory item property with the same name.
 | `package_version` | Yes | Package version, typically matching the released distribution. |
 | `os` | Yes | Operating system, such as `ubuntu24.04`. |
 | `python_version` | Yes | Python version, such as `3.12`. |
+| `runtime_type` | No | Runtime type; defaults to `cuda` when not provided, and an explicitly passed value is written as-is to the same-named Properties (for example `rocm` or `cpu`). Does not affect `runtime`, the upload path, or version generation. |
 | `runtime` | Yes | Runtime version, such as a CUDA version. |
 | `torch_version` | Yes | PyTorch version; pass an empty string when Torch is not applicable. |
 | `sdk_version` | Yes | SDK version. |
@@ -130,11 +140,11 @@ Both outputs are emitted only after every file uploads and every property setter
 
 ## File Selection and Properties
 
-Every regular file inside the downloaded artifact is uploaded, including files in nested or hidden directories. Empty files, arbitrary names, and unsupported formats are not rejected. The script does not open, extract, install, or execute files; the caller is responsible for their contents. Other file types (directories, symlinks) are skipped, and directory symlinks are not followed so files outside the artifact are never uploaded.
+The template passes `artifact_name` to the official Action's `name` parameter to download the specified artifact from the current run. Locating, downloading, retrying, and verifying the digest are all handled by the official Action; the v8 default behavior of failing on a digest mismatch is kept. If the download step fails, the subsequent upload never runs. The download directory is managed by the Action, and the upload step reads from the same dedicated directory.
 
-The upload URL always uses only the file basename. Files with the same basename in different artifact subdirectories target the same URL; later uploads may overwrite earlier ones depending on Artifactory permissions. Use distinct filenames to preserve every file.
+The uploaded object is the raw ZIP saved by the official Action, not the files inside the ZIP. The internal directory structure, filenames, and contents stay inside the raw ZIP, and the ZIP contents are never unpacked or executed on the runner. The template rejects a blank `artifact_name`. All Properties (including `version`, `run_id`, `run_attempt`, and `runtime_type`) are set on the ZIP artifact; `package_type` keeps the value passed by the caller and is not automatically changed to `zip`.
 
-Required property inputs (`artifact_name`, `version`, plus every input-sourced property field except `extra_info`) must not be empty; empty values abort the job before any PUT request is sent. Among the context-derived properties, `commit` and `log_url` must be non-empty, and `run_id` and `run_attempt` must be positive-integer strings; `branch` and `tag` may be empty depending on the trigger type.
+`artifact_name` and every non-optional property must be non-empty; `torch_version` and `extra_info` may be empty. The `version` input may be omitted, but the final version must pass the validation described above; on failure the run stops before any PUT request is sent. Among the context-derived properties, `commit` and `log_url` must be non-empty and `run_id` and `run_attempt` must be positive integer strings, while `branch` and `tag` may be empty depending on the trigger type.
 
 ## Upload and Failure Behavior
 
@@ -153,4 +163,4 @@ python -m pip install --no-input pytest PyYAML
 PYTHONDONTWRITEBYTECODE=1 python -m pytest ci-templates/upload-artifact-properties/tests -q -p no:cacheprovider
 ```
 
-The tests mock uploads and property setters, require no real publishing credentials, and do not access a real Artifactory instance. They do not replace permission, network, and build verification in an actual GitHub Actions environment.
+Local tests check the official Action versions and their `skip-decompress` configuration, the consistency between the download and upload directories, raw ZIP byte preservation, and the Properties contract. Upload and property requests are both mocked, so no real credentials are needed, no official Actions are executed, and no actual Artifactory is contacted; downloading, permissions, and network verification in a real GitHub Actions environment still require an online run.

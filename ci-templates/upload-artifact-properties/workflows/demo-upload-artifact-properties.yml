@@ -7,9 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version path segment placed after the caller owner and repository in the upload URL'
-        required: true
+        description: 'Optional version; when empty, generated as {package_version}+{short_commit}.ppu{sdk_version}, where short_commit is the first 7 characters of the caller SHA'
+        required: false
         type: string
+        default: ''
       package_type:
         description: 'Artifactory item property: package type'
         required: false
@@ -33,6 +34,11 @@ on:
         required: false
         type: string
         default: '3.12'
+      runtime_type:
+        description: 'Runtime type property; defaults to cuda when not provided'
+        required: false
+        type: string
+        default: 'cuda'
       runtime:
         description: 'Artifactory item property: runtime version'
         required: false
@@ -75,8 +81,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # Replace this example with your real build command; every regular file inside
-      # the staged directory is uploaded unchanged.
+      # Replace with the actual build command; the template uploads the whole ZIP saved by Actions directly.
       - name: Stage files for upload
         shell: bash
         run: |
@@ -106,6 +111,7 @@ jobs:
       package_version: ${{ inputs.package_version }}
       os: ${{ inputs.os }}
       python_version: ${{ inputs.python_version }}
+      runtime_type: ${{ inputs.runtime_type }}
       runtime: ${{ inputs.runtime }}
       torch_version: ${{ inputs.torch_version }}
       sdk_version: ${{ inputs.sdk_version }}
