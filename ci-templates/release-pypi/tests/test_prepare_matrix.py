@@ -1073,5 +1073,77 @@ def test_workflow_defaults_generate_real_matrix(script, output_file, monkeypatch
     assert json.loads(values["matrix"])["include"]
 
 
+@pytest.mark.parametrize("package_version", [
+    "1.2.3", "V1.2.3RC1", "nightly-custom", "1..2", "1.2.3+custom", "release/custom value", "",
+])
+@pytest.mark.parametrize("ref_type,ref_name", [
+    ("branch", "main"), ("tag", "9.9.9"), ("tag", "1.0.0RC1"), ("tag", "not-a-version"),
+])
+def test_nightly_uses_raw_package_version_without_tag_resolution(
+    script, output_file, monkeypatch, capsys, package_version, ref_type, ref_name,
+):
+    inputs = dict(DEFAULT_INPUTS, package_name="demo_package", package_version=package_version,
+                  sdk_versions='["2.1.1", "2.2.0"]', torch_versions='["", "2.13.0"]')
+    monkeypatch.setenv("INPUTS_JSON", json.dumps(inputs))
+    monkeypatch.setenv("GITHUB_OUTPUT", "github-output")
+    monkeypatch.setenv("NIGHTLY_BUILD", "true")
+    monkeypatch.setenv("GITHUB_REF_TYPE", ref_type)
+    monkeypatch.setenv("GITHUB_REF_NAME", ref_name)
+    monkeypatch.delenv("SOURCE_DIR", raising=False)
+    resolver = create_autospec(script.get_build_tag, side_effect=AssertionError("must not resolve tags"))
+    runner = create_autospec(script.subprocess.run, side_effect=AssertionError("must not run git"))
+    monkeypatch.setattr(script, "get_build_tag", resolver)
+    monkeypatch.setattr(script.subprocess, "run", runner)
+    script.main()
+    written = "".join(call.args[0] for call in output_file().write.call_args_list)
+    values = dict(line.split("=", 1) for line in written.splitlines())
+    assert values["should_release"] == "false"
+    entries = json.loads(values["matrix"])["include"]
+    assert len(entries) == 4
+    for entry in entries:
+        assert entry["release_version"] == package_version
+        assert entry["tag"] == entry["whl_name"] == ""
+        assert entry["image"] == script.IMAGES_MAP[image_key(entry)]
+        assert entry["sdk_url"] == expected_sdk_url(entry["sdk_version"], "13.0.0", "ubuntu2204")
+        assert entry["nccl_url"] == expected_nccl_url("2.2.1", "13.0.0", "ubuntu2204")
+    resolver.assert_not_called()
+    runner.assert_not_called()
+    assert capsys.readouterr().out == "Generated 4 matrix jobs\n"
+
+
+@pytest.mark.parametrize("override,error", [
+    ({"python_versions": '["39"]'}, "python_versions contains unsupported value"),
+    ({"sdk_versions": "[]"}, "sdk_versions must be a non-empty JSON array"),
+    ({"package_name": "../pkg"}, "package_name must be a valid Python package name"),
+    ({"python_versions": '["38"]'}, "missing ubuntu2204-py38"),
+])
+def test_nightly_still_validates_build_matrix(script, output_file, monkeypatch, override, error):
+    inputs = dict(DEFAULT_INPUTS, package_name="demo_package", package_version="nightly-custom")
+    inputs.update(override)
+    monkeypatch.setenv("INPUTS_JSON", json.dumps(inputs))
+    monkeypatch.setenv("NIGHTLY_BUILD", "true")
+    monkeypatch.delenv("SOURCE_DIR", raising=False)
+    with pytest.raises(SystemExit, match=error):
+        script.main()
+    output_file.assert_not_called()
+
+
+def test_nightly_entrypoint_runs_without_packaging_or_caller_history():
+    with tempfile.TemporaryDirectory(prefix=".nightly-matrix-test-", dir=SCRIPT_PATH.parents[1]) as directory:
+        output = Path(directory) / "github-output"
+        inputs = dict(DEFAULT_INPUTS, package_name="demo_package", package_version="custom-nightly")
+        env = dict(os.environ, NIGHTLY_BUILD="true", INPUTS_JSON=json.dumps(inputs),
+                   GITHUB_OUTPUT=str(output), GITHUB_REF_TYPE="tag", GITHUB_REF_NAME="not-a-version")
+        env.pop("SOURCE_DIR", None)
+        result = subprocess.run([sys.executable, "-S", str(SCRIPT_PATH)], cwd=directory, env=env,
+                                text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert values["should_release"] == "false"
+        entry, = json.loads(values["matrix"])["include"]
+        assert entry["release_version"] == "custom-nightly"
+        assert entry["tag"] == entry["whl_name"] == ""
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

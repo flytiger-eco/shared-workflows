@@ -5,8 +5,6 @@ import os
 import re
 import subprocess
 
-from packaging.version import InvalidVersion, Version
-
 IMAGES_MAP = {
     "ubuntu2404-py312": "pkg.flytiger-eco.com/docker_tool/ubuntu2404-py312:06",
     "ubuntu2204-py310": "pkg.flytiger-eco.com/docker_tool/ubuntu2204-py310:05",
@@ -19,6 +17,7 @@ IMAGES_MAP = {
 SDK_MAP = {
     "2.1.1": "a5c56e",
     "2.2.0": "663c22",
+    "2.2.1": "184ee6",
 }
 
 def fail(message):
@@ -76,6 +75,8 @@ def get_nccl_url(nccl_sdk_version, runtime_version, os_version):
 
 def get_build_tag(tag_version=""):
     """Prefer the specified version; filter out rc in all sources and strip the leading v/V consistently."""
+    from packaging.version import InvalidVersion, Version
+
     version_pattern = r"[vV]?[0-9][A-Za-z0-9.!_]*(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?"
     if tag_version != "":
         # Validate both release-path safety and PEP 440; an invalid override never falls back to the repository version.
@@ -119,9 +120,10 @@ def main():
     inputs = parse_json(os.environ["INPUTS_JSON"], "inputs")
     if not isinstance(inputs, dict):
         fail("inputs must be a JSON object")
-    tag = get_build_tag(inputs.get("tag_version", ""))
+    nightly_build = os.environ.get("NIGHTLY_BUILD") == "true"
+    tag = None if nightly_build else get_build_tag(inputs.get("tag_version", ""))
     should_release = tag is not None
-    if not should_release:
+    if not should_release and not nightly_build:
         print("The tag contains rc (case-insensitive) or the current commit has no qualifying version tag; only build the wheel and save the Actions artifact without publishing")
 
     package_name = inputs.get("package_name", "")
@@ -193,6 +195,8 @@ def main():
         )
         # Non-release builds generate no release version or target file name, keeping the original wheel produced by the build command.
         entry.update(tag="", release_version="", whl_name="")
+        if nightly_build:
+            entry["release_version"] = inputs["package_version"]
         if should_release:
             # Record the final version (the specified tag_version or the repository tag) for release data aggregation.
             entry["tag"] = tag
