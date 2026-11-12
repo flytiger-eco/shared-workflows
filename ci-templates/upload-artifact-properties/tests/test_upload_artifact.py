@@ -954,9 +954,10 @@ def test_nightly_contract_keeps_matrix_entry_and_adds_upload_metadata(nightly_wo
                       if key != "tag_version"}
     properties_inputs = properties["on"]["workflow_call"]["inputs"]
     additions = {"version", "package_version", "package_edition", "runtime_type", "extra_info"}
-    assert set(contract["inputs"]) == set(release_inputs) | additions | {"branch"}
+    assert set(contract["inputs"]) == set(release_inputs) | additions | {"branch", "package_type"}
     expected_inputs = {**release_inputs, **{key: properties_inputs[key] for key in additions}}
     expected_inputs["sdk_versions"] = dict(release_inputs["sdk_versions"], default='["2.2.1"]')
+    expected_inputs["package_type"] = {"type": "string", "required": "false", "default": "binary"}
     for name, expected in expected_inputs.items():
         for field in ("type", "required", "default"):
             assert contract["inputs"][name].get(field) == expected.get(field), (name, field)
@@ -1107,7 +1108,7 @@ def test_nightly_matrix_properties_reach_uploader(
     )
     assert result.returncode == 0, result.stderr
     metadata = json.loads(result.stdout)
-    assert metadata == dict(inputs, package_type="pypi", package_name="demo_package",
+    assert metadata == dict(inputs, package_type="binary", package_name="demo_package",
                             os=os_version, python_version=python_version, runtime="13.0.0",
                             torch_version=torch_version, sdk_version=sdk_version)
     assert list(archive.parent.iterdir()) == [archive]
@@ -1122,7 +1123,7 @@ def test_nightly_matrix_properties_reach_uploader(
     assert archive.read_bytes() == artifact_zip_bytes
     storage_url, _ = _last_curl_flags(_curl_args(transport)[1])
     assert _query_pairs(storage_url) == dict(
-        expected_property_values(), package_type="pypi", os=os_version,
+        expected_property_values(), package_type="binary", os=os_version,
         python_version=python_version, torch_version=torch_version, sdk_version=sdk_version,
         version=expected_version, package_version=package_version, package_edition=package_edition,
         extra_info=inputs["extra_info"],
@@ -1306,8 +1307,9 @@ def test_nightly_resolved_sha_remains_fixed_after_branch_updates(run_nightly_sou
     ("$sha", "$sha", "", ""),
 ])
 @pytest.mark.parametrize("version", ["", "custom-upload-directory"])
+@pytest.mark.parametrize("package_type", ["pypi", "custom-package"])
 def test_nightly_selected_source_reaches_upload_version_and_properties(
-    requested, checkout, branch, tag, version, nightly_workflow, run_nightly_source,
+    requested, checkout, branch, tag, version, package_type, nightly_workflow, run_nightly_source,
     nightly_source_repository, make_file, artifact_zip_bytes, request,
 ):
     repo = nightly_source_repository
@@ -1315,7 +1317,8 @@ def test_nightly_selected_source_reaches_upload_version_and_properties(
     checkout = repo[checkout[1:]] if checkout.startswith("$") else checkout
     result, source = run_nightly_source(requested, checkout)
     assert result.returncode == 0, result.stderr
-    inputs = dict(DEFAULT_INPUTS, branch=requested, version=version, package_version="nightly-custom")
+    inputs = dict(DEFAULT_INPUTS, branch=requested, version=version, package_version="nightly-custom",
+                  package_type=package_type)
     matrix = {
         "python_version": "310", "os_version": "ubuntu2204", "runtime_version": "13.0.0",
         "torch_version": "2.13.0", "sdk_version": "2.2.0",
@@ -1360,7 +1363,7 @@ PY
     assert archive.read_bytes() == artifact_zip_bytes
     storage_url, _ = _last_curl_flags(_curl_args(transport)[1])
     assert _query_pairs(storage_url) == dict(
-        expected_property_values(), package_type="pypi", package_version="nightly-custom",
+        expected_property_values(), package_type=package_type, package_version="nightly-custom",
         version=expected_version, os="ubuntu2204", python_version="310", torch_version="2.13.0",
         commit=source["sha"], branch=branch, tag=tag,
     )
