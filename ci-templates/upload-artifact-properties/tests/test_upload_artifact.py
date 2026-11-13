@@ -954,10 +954,11 @@ def test_nightly_contract_keeps_matrix_entry_and_adds_upload_metadata(nightly_wo
                       if key != "tag_version"}
     properties_inputs = properties["on"]["workflow_call"]["inputs"]
     additions = {"version", "package_version", "package_edition", "runtime_type", "extra_info"}
-    assert set(contract["inputs"]) == set(release_inputs) | additions | {"branch", "package_type"}
+    assert set(contract["inputs"]) == set(release_inputs) | additions | {"branch", "package_type", "runs_on"}
     expected_inputs = {**release_inputs, **{key: properties_inputs[key] for key in additions}}
     expected_inputs["sdk_versions"] = dict(release_inputs["sdk_versions"], default='["2.2.1"]')
     expected_inputs["package_type"] = {"type": "string", "required": "false", "default": "binary"}
+    expected_inputs["runs_on"] = {"type": "string", "required": "false", "default": "ubuntu-latest"}
     for name, expected in expected_inputs.items():
         for field in ("type", "required", "default"):
             assert contract["inputs"][name].get(field) == expected.get(field), (name, field)
@@ -973,7 +974,8 @@ def test_nightly_keeps_only_requested_jobs_and_steps(nightly_workflow):
                         Loader=yaml.BaseLoader)
     properties = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     assert set(nightly_workflow["jobs"]) == {"prepare-matrix", "matrix-job"}
-    prepare = dict(release["jobs"]["prepare-matrix"])
+    runs_on = "${{ startsWith(inputs.runs_on, '[') && fromJSON(inputs.runs_on) || inputs.runs_on }}"
+    prepare = dict(release["jobs"]["prepare-matrix"], **{"runs-on": runs_on})
     prepare["outputs"] = {key: value for key, value in prepare["outputs"].items()
                           if key != "should_release"}
     prepare["steps"] = [dict(step) for step in prepare["steps"] if step["name"] not in {
@@ -990,6 +992,7 @@ def test_nightly_keeps_only_requested_jobs_and_steps(nightly_workflow):
     assert actual_prepare == prepare
     job = nightly_workflow["jobs"]["matrix-job"]
     original_job = release["jobs"]["matrix-job"]
+    original_job["runs-on"] = runs_on
     original_job["env"].update({
         f"SOURCE_{key.upper()}": "${{ needs.prepare-matrix.outputs.source_" + key + " }}"
         for key in ("sha", "branch", "tag")
