@@ -457,164 +457,164 @@ jobs:
           compression-level: 0
           include-hidden-files: true
 
-      # The Docker action shares the workspace with the build container and repacks inside the given tool image.
-      - name: Repack wheel
-        if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
-        uses: docker://pkg.flytiger-eco.com/docker_tool/manylinux_revpkg:04
-        with:
-          entrypoint: /bin/bash
-          args: |
-            -euo pipefail -c "
-            : \"${RELEASE_VERSION:?RELEASE_VERSION must not be empty}\"
-            shopt -s nullglob
-            wheels=(dist/*.whl)
-            if (( ${#wheels[@]} != 1 )); then
-              printf '%s\n' '::error::the dist directory must contain exactly one wheel file before repacking' >&2
-              printf '%s\n' 'dist directory listing (including hidden files):' >&2
-              ls -la -- dist >&2 || true
-              exit 1
-            fi
-            wheel=\"${wheels[0]}\"
-            if [[ ! -f \"$wheel\" || -L \"$wheel\" ]]; then
-              printf '%s\n' '::error::the wheel to repack must be a regular file, not a symlink' >&2
-              exit 1
-            fi
+      # # The Docker action shares the workspace with the build container and repacks inside the given tool image.
+      # - name: Repack wheel
+      #   if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
+      #   uses: docker://pkg.flytiger-eco.com/docker_tool/manylinux_revpkg:04
+      #   with:
+      #     entrypoint: /bin/bash
+      #     args: |
+      #       -euo pipefail -c "
+      #       : \"${RELEASE_VERSION:?RELEASE_VERSION must not be empty}\"
+      #       shopt -s nullglob
+      #       wheels=(dist/*.whl)
+      #       if (( ${#wheels[@]} != 1 )); then
+      #         printf '%s\n' '::error::the dist directory must contain exactly one wheel file before repacking' >&2
+      #         printf '%s\n' 'dist directory listing (including hidden files):' >&2
+      #         ls -la -- dist >&2 || true
+      #         exit 1
+      #       fi
+      #       wheel=\"${wheels[0]}\"
+      #       if [[ ! -f \"$wheel\" || -L \"$wheel\" ]]; then
+      #         printf '%s\n' '::error::the wheel to repack must be a regular file, not a symlink' >&2
+      #         exit 1
+      #       fi
 
-            mkdir -p /tmp/origin /tmp/release
-            existing=(/tmp/release/*.whl)
-            if (( ${#existing[@]} != 0 )); then
-              printf '%s\n' '::error::wheel files already exist in the repack output directory' >&2
-              exit 1
-            fi
-            WHEEL_FILE=\"${wheel##*/}\"
-            cp -- \"$wheel\" \"/tmp/origin/$WHEEL_FILE\"
-            revpkg --input \"/tmp/origin/${WHEEL_FILE}\" --output /tmp/release --new-version \"${RELEASE_VERSION}\"
+      #       mkdir -p /tmp/origin /tmp/release
+      #       existing=(/tmp/release/*.whl)
+      #       if (( ${#existing[@]} != 0 )); then
+      #         printf '%s\n' '::error::wheel files already exist in the repack output directory' >&2
+      #         exit 1
+      #       fi
+      #       WHEEL_FILE=\"${wheel##*/}\"
+      #       cp -- \"$wheel\" \"/tmp/origin/$WHEEL_FILE\"
+      #       revpkg --input \"/tmp/origin/${WHEEL_FILE}\" --output /tmp/release --new-version \"${RELEASE_VERSION}\"
 
-            repacked=(/tmp/release/*.whl)
-            if (( ${#repacked[@]} != 1 )); then
-              printf '%s\n' '::error::repacking must produce exactly one wheel file' >&2
-              exit 1
-            fi
-            if [[ ! -f \"${repacked[0]}\" || -L \"${repacked[0]}\" || ! -s \"${repacked[0]}\" ]]; then
-              printf '%s\n' '::error::the repacked artifact must be a non-empty regular wheel file, not a symlink' >&2
-              exit 1
-            fi
-            # Keep the original file name of the build output; the next step renames it as required by the matrix.
-            cp -- \"${repacked[0]}\" \"$wheel\"
-            printf 'Repacked wheel: %s\n' \"$wheel\"
-            "
+      #       repacked=(/tmp/release/*.whl)
+      #       if (( ${#repacked[@]} != 1 )); then
+      #         printf '%s\n' '::error::repacking must produce exactly one wheel file' >&2
+      #         exit 1
+      #       fi
+      #       if [[ ! -f \"${repacked[0]}\" || -L \"${repacked[0]}\" || ! -s \"${repacked[0]}\" ]]; then
+      #         printf '%s\n' '::error::the repacked artifact must be a non-empty regular wheel file, not a symlink' >&2
+      #         exit 1
+      #       fi
+      #       # Keep the original file name of the build output; the next step renames it as required by the matrix.
+      #       cp -- \"${repacked[0]}\" \"$wheel\"
+      #       printf 'Repacked wheel: %s\n' \"$wheel\"
+      #       "
 
-      - name: Rename wheel
-        if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${WHL_NAME:?WHL_NAME must not be empty}"
-          if [[ ! "$WHL_NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9_.+!-]*\.whl$ ]]; then
-            printf '%s\n' '::error::WHL_NAME must be a wheel file name without path or special characters' >&2
-            exit 1
-          fi
-          shopt -s nullglob
-          wheels=(dist/*.whl)
-          if (( ${#wheels[@]} != 1 )); then
-            printf '%s\n' '::error::the dist directory must contain exactly one wheel file after repacking' >&2
-            exit 1
-          fi
-          wheel="${wheels[0]}"
-          target="dist/$WHL_NAME"
-          if [[ ! -f "$wheel" || -L "$wheel" ]]; then
-            printf '%s\n' '::error::the wheel to rename must be a regular file, not a symlink' >&2
-            exit 1
-          fi
-          # Rename the file only, without touching the wheel internal metadata; keep it as is when it already has the target name.
-          if [[ "$wheel" != "$target" ]]; then
-            if [[ -e "$target" || -L "$target" ]]; then
-              printf '%s\n' '::error::the target wheel already exists; refusing to overwrite' >&2
-              exit 1
-            fi
-            mv -- "$wheel" "$target"
-          fi
-          printf 'Wheel artifact: %s\n' "$target"
+      # - name: Rename wheel
+      #   if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     : "${WHL_NAME:?WHL_NAME must not be empty}"
+      #     if [[ ! "$WHL_NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9_.+!-]*\.whl$ ]]; then
+      #       printf '%s\n' '::error::WHL_NAME must be a wheel file name without path or special characters' >&2
+      #       exit 1
+      #     fi
+      #     shopt -s nullglob
+      #     wheels=(dist/*.whl)
+      #     if (( ${#wheels[@]} != 1 )); then
+      #       printf '%s\n' '::error::the dist directory must contain exactly one wheel file after repacking' >&2
+      #       exit 1
+      #     fi
+      #     wheel="${wheels[0]}"
+      #     target="dist/$WHL_NAME"
+      #     if [[ ! -f "$wheel" || -L "$wheel" ]]; then
+      #       printf '%s\n' '::error::the wheel to rename must be a regular file, not a symlink' >&2
+      #       exit 1
+      #     fi
+      #     # Rename the file only, without touching the wheel internal metadata; keep it as is when it already has the target name.
+      #     if [[ "$wheel" != "$target" ]]; then
+      #       if [[ -e "$target" || -L "$target" ]]; then
+      #         printf '%s\n' '::error::the target wheel already exists; refusing to overwrite' >&2
+      #         exit 1
+      #       fi
+      #       mv -- "$wheel" "$target"
+      #     fi
+      #     printf 'Wheel artifact: %s\n' "$target"
 
-      - name: Upload wheel to Artifactory
-        if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
-        shell: bash
-        env:
-          ARTIFACTORY_URL: https://pkg.flytiger-eco.com/artifactory/pypi_generic/
-          PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
-          RELEASE_USERNAME: ${{ secrets.release_username }}
-          RELEASE_TOKEN: ${{ secrets.release_token }}
-        run: |
-          set -euo pipefail
-          : "${RELEASE_USERNAME:?release username must not be empty}"
-          : "${RELEASE_TOKEN:?release token must not be empty}"
-          : "${RELEASE_VERSION:?RELEASE_VERSION must not be empty}"
-          : "${WHL_NAME:?WHL_NAME must not be empty}"
-          shopt -s nullglob
-          wheels=(dist/*.whl)
-          if (( ${#wheels[@]} == 0 )); then
-            printf '%s\n' '::error::no wheel file found in the dist directory' >&2
-            exit 1
-          fi
+      # - name: Upload wheel to Artifactory
+      #   if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
+      #   shell: bash
+      #   env:
+      #     ARTIFACTORY_URL: https://pkg.flytiger-eco.com/artifactory/pypi_generic/
+      #     PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
+      #     RELEASE_USERNAME: ${{ secrets.release_username }}
+      #     RELEASE_TOKEN: ${{ secrets.release_token }}
+      #   run: |
+      #     set -euo pipefail
+      #     : "${RELEASE_USERNAME:?release username must not be empty}"
+      #     : "${RELEASE_TOKEN:?release token must not be empty}"
+      #     : "${RELEASE_VERSION:?RELEASE_VERSION must not be empty}"
+      #     : "${WHL_NAME:?WHL_NAME must not be empty}"
+      #     shopt -s nullglob
+      #     wheels=(dist/*.whl)
+      #     if (( ${#wheels[@]} == 0 )); then
+      #       printf '%s\n' '::error::no wheel file found in the dist directory' >&2
+      #       exit 1
+      #     fi
 
-          # Validate all files and target paths before sending any upload request that carries credentials.
-          upload_urls=()
-          for wheel in "${wheels[@]}"; do
-            if [[ ! -f "$wheel" || -L "$wheel" ]]; then
-              printf '%s\n' '::error::upload artifacts must be regular wheel files, not symlinks' >&2
-              exit 1
-            fi
-            upload_url="$(python3 - "$wheel" <<'PY'
-          import os
-          from pathlib import Path
-          import re
-          import sys
-          from urllib.parse import quote
+      #     # Validate all files and target paths before sending any upload request that carries credentials.
+      #     upload_urls=()
+      #     for wheel in "${wheels[@]}"; do
+      #       if [[ ! -f "$wheel" || -L "$wheel" ]]; then
+      #         printf '%s\n' '::error::upload artifacts must be regular wheel files, not symlinks' >&2
+      #         exit 1
+      #       fi
+      #       upload_url="$(python3 - "$wheel" <<'PY'
+      #     import os
+      #     from pathlib import Path
+      #     import re
+      #     import sys
+      #     from urllib.parse import quote
 
-          filename = Path(sys.argv[1]).name
-          match = re.fullmatch(
-              r"(?P<name>[A-Za-z0-9_][A-Za-z0-9_.]*)-"
-              r"(?P<version>[0-9][A-Za-z0-9.!+_]*)-"
-              r"(?:[0-9][A-Za-z0-9_.]*-)?"
-              r"[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+\.whl",
-              filename,
-          )
-          if match is None:
-              raise SystemExit("::error::invalid wheel file name format")
-          package_name = os.environ["PACKAGE_NAME"]
-          if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", package_name):
-              raise SystemExit("::error::package_name must be a valid Python package name")
-          normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
-          if normalize(match["name"]) != normalize(package_name):
-              raise SystemExit("::error::the wheel package name does not match package_name")
-          release_version = os.environ["RELEASE_VERSION"]
-          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!\-]*", release_version):
-              raise SystemExit("::error::RELEASE_VERSION must be a valid version directory name without path or special characters")
-          whl_name = os.environ["WHL_NAME"]
-          if filename != whl_name:
-              raise SystemExit("::error::the uploaded wheel file name does not match WHL_NAME")
-          components = (package_name, release_version, whl_name)
-          print(os.environ["ARTIFACTORY_URL"].rstrip("/") + "/" + "/".join(quote(part, safe="") for part in components))
-          PY
-          )"
-            upload_urls+=("$upload_url")
-          done
+      #     filename = Path(sys.argv[1]).name
+      #     match = re.fullmatch(
+      #         r"(?P<name>[A-Za-z0-9_][A-Za-z0-9_.]*)-"
+      #         r"(?P<version>[0-9][A-Za-z0-9.!+_]*)-"
+      #         r"(?:[0-9][A-Za-z0-9_.]*-)?"
+      #         r"[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+\.whl",
+      #         filename,
+      #     )
+      #     if match is None:
+      #         raise SystemExit("::error::invalid wheel file name format")
+      #     package_name = os.environ["PACKAGE_NAME"]
+      #     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", package_name):
+      #         raise SystemExit("::error::package_name must be a valid Python package name")
+      #     normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+      #     if normalize(match["name"]) != normalize(package_name):
+      #         raise SystemExit("::error::the wheel package name does not match package_name")
+      #     release_version = os.environ["RELEASE_VERSION"]
+      #     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!\-]*", release_version):
+      #         raise SystemExit("::error::RELEASE_VERSION must be a valid version directory name without path or special characters")
+      #     whl_name = os.environ["WHL_NAME"]
+      #     if filename != whl_name:
+      #         raise SystemExit("::error::the uploaded wheel file name does not match WHL_NAME")
+      #     components = (package_name, release_version, whl_name)
+      #     print(os.environ["ARTIFACTORY_URL"].rstrip("/") + "/" + "/".join(quote(part, safe="") for part in components))
+      #     PY
+      #     )"
+      #       upload_urls+=("$upload_url")
+      #     done
 
-          # The upload path is package_name/release_version/whl_name; builders must ensure wheel file names from different matrix configurations do not collide.
-          for index in "${!wheels[@]}"; do
-            wheel="${wheels[$index]}"
-            # Do not follow redirects to avoid sending artifacts or release credentials to other addresses.
-            status="$(curl --fail --silent --show-error --retry 3 \
-              --connect-timeout 30 --max-time 600 --proto '=https' \
-              --user "$RELEASE_USERNAME:$RELEASE_TOKEN" \
-              --upload-file "$wheel" --output /dev/null --write-out '%{http_code}' \
-              -- "${upload_urls[$index]}")"
-            if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
-              printf '%s\n' "::error::Artifactory upload failed with HTTP status: $status" >&2
-              exit 1
-            fi
-            printf 'Uploaded %s\n' "${wheel##*/}"
-          done
+      #     # The upload path is package_name/release_version/whl_name; builders must ensure wheel file names from different matrix configurations do not collide.
+      #     for index in "${!wheels[@]}"; do
+      #       wheel="${wheels[$index]}"
+      #       # Do not follow redirects to avoid sending artifacts or release credentials to other addresses.
+      #       status="$(curl --fail --silent --show-error --retry 3 \
+      #         --connect-timeout 30 --max-time 600 --proto '=https' \
+      #         --user "$RELEASE_USERNAME:$RELEASE_TOKEN" \
+      #         --upload-file "$wheel" --output /dev/null --write-out '%{http_code}' \
+      #         -- "${upload_urls[$index]}")"
+      #       if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+      #         printf '%s\n' "::error::Artifactory upload failed with HTTP status: $status" >&2
+      #         exit 1
+      #       fi
+      #       printf 'Uploaded %s\n' "${wheel##*/}"
+      #     done
 
       - name: Upload GitHub Release wheel artifacts
         # The pinned version has already passed matrix validation and the rc gate, so release artifacts are also stored on branch triggers.
@@ -626,261 +626,261 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-      - name: Generate release data JSON
-        if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
-        shell: bash
-        env:
-          PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
-          MATRIX_JSON: ${{ toJSON(matrix) }}
-          MATRIX_INDEX: ${{ strategy.job-index }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import re
+      # - name: Generate release data JSON
+      #   if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
+      #   shell: bash
+      #   env:
+      #     PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
+      #     MATRIX_JSON: ${{ toJSON(matrix) }}
+      #     MATRIX_INDEX: ${{ strategy.job-index }}
+      #   run: |
+      #     python3 - <<'PY'
+      #     import json
+      #     import os
+      #     from pathlib import Path
+      #     import re
 
-          matrix = json.loads(os.environ["MATRIX_JSON"])
-          package_name = os.environ["PACKAGE_NAME"]
-          data = {
-              "artifactName": package_name,
-              "sdkVersion": matrix["sdk_version"],
-              "item": package_name,
-              "osTypeList": matrix["os_version"],
-              "runtimeVersion": matrix["runtime_version"],
-              "framework": matrix["torch_version"],
-              "python": matrix["python_version"],
-              "tag": matrix["tag"],
-          }
-          index = os.environ["MATRIX_INDEX"]
-          if not re.fullmatch(r"[0-9]+", index):
-              raise SystemExit("::error::the matrix index must be a non-negative integer")
-          # The file name embeds the matrix index so the final merged download keeps the data of every successful job.
-          output = Path(os.environ["RUNNER_TEMP"]) / "release-data" / f"release-{index}.json"
-          output.parent.mkdir(parents=True, exist_ok=True)
-          content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-          with output.open("x", encoding="utf-8") as target:
-              target.write(content)
-          print(content, end="")
-          PY
+      #     matrix = json.loads(os.environ["MATRIX_JSON"])
+      #     package_name = os.environ["PACKAGE_NAME"]
+      #     data = {
+      #         "artifactName": package_name,
+      #         "sdkVersion": matrix["sdk_version"],
+      #         "item": package_name,
+      #         "osTypeList": matrix["os_version"],
+      #         "runtimeVersion": matrix["runtime_version"],
+      #         "framework": matrix["torch_version"],
+      #         "python": matrix["python_version"],
+      #         "tag": matrix["tag"],
+      #     }
+      #     index = os.environ["MATRIX_INDEX"]
+      #     if not re.fullmatch(r"[0-9]+", index):
+      #         raise SystemExit("::error::the matrix index must be a non-negative integer")
+      #     # The file name embeds the matrix index so the final merged download keeps the data of every successful job.
+      #     output = Path(os.environ["RUNNER_TEMP"]) / "release-data" / f"release-{index}.json"
+      #     output.parent.mkdir(parents=True, exist_ok=True)
+      #     content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+      #     with output.open("x", encoding="utf-8") as target:
+      #         target.write(content)
+      #     print(content, end="")
+      #     PY
 
-      - name: Upload release data JSON
-        if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ needs.prepare-matrix.outputs.package_name }}-release-data-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/release-data/release-${{ strategy.job-index }}.json
-          if-no-files-found: error
+      # - name: Upload release data JSON
+      #   if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ needs.prepare-matrix.outputs.package_name }}-release-data-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+      #     path: ${{ runner.temp }}/release-data/release-${{ strategy.job-index }}.json
+      #     if-no-files-found: error
 
-      - name: Record matrix job success
-        if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
-        shell: bash
-        run: printf 'success\n' > "$RUNNER_TEMP/matrix-success.txt"
+      # - name: Record matrix job success
+      #   if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
+      #   shell: bash
+      #   run: printf 'success\n' > "$RUNNER_TEMP/matrix-success.txt"
 
-      - name: Upload matrix job success marker
-        if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ needs.prepare-matrix.outputs.package_name }}-matrix-success-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/matrix-success.txt
-          if-no-files-found: error
+      # - name: Upload matrix job success marker
+      #   if: ${{ needs.prepare-matrix.outputs.should_release == 'true' }}
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ needs.prepare-matrix.outputs.package_name }}-matrix-success-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+      #     path: ${{ runner.temp }}/matrix-success.txt
+      #     if-no-files-found: error
 
-  publish-sdist:
-    name: Publish sdist after at least one matrix job succeeds
-    needs: [prepare-matrix, build-sdist, matrix-job]
-    # Check the success markers even when the matrix result is failure; do not publish on cancellation, skip, or sdist build failure.
-    if: ${{ !cancelled() && needs.prepare-matrix.outputs.should_release == 'true' && needs.build-sdist.result == 'success' && (needs.matrix-job.result == 'success' || needs.matrix-job.result == 'failure') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      published: ${{ steps.publish.outcome == 'success' }}
-    steps:
-      - name: Download success markers for this run attempt
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ${{ needs.prepare-matrix.outputs.package_name }}-matrix-success-${{ github.run_id }}-${{ github.run_attempt }}-*
-          path: matrix-results
-          merge-multiple: false
+  # publish-sdist:
+  #   name: Publish sdist after at least one matrix job succeeds
+  #   needs: [prepare-matrix, build-sdist, matrix-job]
+  #   # Check the success markers even when the matrix result is failure; do not publish on cancellation, skip, or sdist build failure.
+  #   if: ${{ !cancelled() && needs.prepare-matrix.outputs.should_release == 'true' && needs.build-sdist.result == 'success' && (needs.matrix-job.result == 'success' || needs.matrix-job.result == 'failure') }}
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 15
+  #   outputs:
+  #     published: ${{ steps.publish.outcome == 'success' }}
+  #   steps:
+  #     - name: Download success markers for this run attempt
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         pattern: ${{ needs.prepare-matrix.outputs.package_name }}-matrix-success-${{ github.run_id }}-${{ github.run_attempt }}-*
+  #         path: matrix-results
+  #         merge-multiple: false
 
-      - name: Determine whether any matrix job succeeded
-        id: matrix-success
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
+  #     - name: Determine whether any matrix job succeeded
+  #       id: matrix-success
+  #       shell: bash
+  #       run: |
+  #         python3 - <<'PY'
+  #         import os
+  #         from pathlib import Path
 
-          any_success = any(
-              path.is_file() and not path.is_symlink() and path.read_text(encoding="utf-8") == "success\n"
-              for path in Path("matrix-results").glob("*/matrix-success.txt")
-          )
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"any_success={str(any_success).lower()}\n")
-          print("Detected successful jobs; sdist will be published" if any_success else "No successful matrix jobs; skipping sdist publish")
-          PY
+  #         any_success = any(
+  #             path.is_file() and not path.is_symlink() and path.read_text(encoding="utf-8") == "success\n"
+  #             for path in Path("matrix-results").glob("*/matrix-success.txt")
+  #         )
+  #         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+  #             output.write(f"any_success={str(any_success).lower()}\n")
+  #         print("Detected successful jobs; sdist will be published" if any_success else "No successful matrix jobs; skipping sdist publish")
+  #         PY
 
-      - name: Download sdist to publish
-        if: ${{ steps.matrix-success.outputs.any_success == 'true' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.prepare-matrix.outputs.package_name }}-sdist
-          path: sdist-dist
+  #     - name: Download sdist to publish
+  #       if: ${{ steps.matrix-success.outputs.any_success == 'true' }}
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: ${{ needs.prepare-matrix.outputs.package_name }}-sdist
+  #         path: sdist-dist
 
-      - name: Set up Python for sdist publish
-        if: ${{ steps.matrix-success.outputs.any_success == 'true' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+  #     - name: Set up Python for sdist publish
+  #       if: ${{ steps.matrix-success.outputs.any_success == 'true' }}
+  #       uses: actions/setup-python@v5
+  #       with:
+  #         python-version: '3.12'
 
-      - name: Install Twine
-        if: ${{ steps.matrix-success.outputs.any_success == 'true' }}
-        shell: bash
-        run: python -m pip install --no-input twine
+  #     - name: Install Twine
+  #       if: ${{ steps.matrix-success.outputs.any_success == 'true' }}
+  #       shell: bash
+  #       run: python -m pip install --no-input twine
 
-      - name: Upload sdist to Artifactory
-        id: publish
-        if: ${{ steps.matrix-success.outputs.any_success == 'true' }}
-        shell: bash
-        env:
-          ARTIFACTORY_URL: https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_srcsupport/
-          PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
-          MATRIX_JSON: ${{ needs.prepare-matrix.outputs.matrix }}
-          TWINE_USERNAME: ${{ secrets.release_username }}
-          TWINE_PASSWORD: ${{ secrets.release_token }}
-        run: |
-          set -euo pipefail
-          : "${TWINE_USERNAME:?release username must not be empty}"
-          : "${TWINE_PASSWORD:?release token must not be empty}"
-          shopt -s nullglob
-          archives=(sdist-dist/*.tar.gz)
-          if (( ${#archives[@]} == 0 )); then
-            printf '%s\n' '::error::no sdist tar.gz file found to publish' >&2
-            exit 1
-          fi
-          # Every artifact maps one-to-one to a deduplicated release version; start uploading only after all validations pass.
-          python3 - "${archives[@]}" <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import re
-          import sys
-          from packaging.utils import canonicalize_name, InvalidSdistFilename, parse_sdist_filename
-          from packaging.version import InvalidVersion, Version
+  #     - name: Upload sdist to Artifactory
+  #       id: publish
+  #       if: ${{ steps.matrix-success.outputs.any_success == 'true' }}
+  #       shell: bash
+  #       env:
+  #         ARTIFACTORY_URL: https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_srcsupport/
+  #         PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
+  #         MATRIX_JSON: ${{ needs.prepare-matrix.outputs.matrix }}
+  #         TWINE_USERNAME: ${{ secrets.release_username }}
+  #         TWINE_PASSWORD: ${{ secrets.release_token }}
+  #       run: |
+  #         set -euo pipefail
+  #         : "${TWINE_USERNAME:?release username must not be empty}"
+  #         : "${TWINE_PASSWORD:?release token must not be empty}"
+  #         shopt -s nullglob
+  #         archives=(sdist-dist/*.tar.gz)
+  #         if (( ${#archives[@]} == 0 )); then
+  #           printf '%s\n' '::error::no sdist tar.gz file found to publish' >&2
+  #           exit 1
+  #         fi
+  #         # Every artifact maps one-to-one to a deduplicated release version; start uploading only after all validations pass.
+  #         python3 - "${archives[@]}" <<'PY'
+  #         import json
+  #         import os
+  #         from pathlib import Path
+  #         import re
+  #         import sys
+  #         from packaging.utils import canonicalize_name, InvalidSdistFilename, parse_sdist_filename
+  #         from packaging.version import InvalidVersion, Version
 
-          package_name = os.environ["PACKAGE_NAME"]
-          if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", package_name):
-              raise SystemExit("::error::package_name must be a valid Python package name")
-          try:
-              entries = json.loads(os.environ["MATRIX_JSON"])["include"]
-              if not isinstance(entries, list) or not entries:
-                  raise ValueError
-              expected = set()
-              for entry in entries:
-                  version = entry["release_version"]
-                  if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!\-]*", version):
-                      raise ValueError
-                  expected.add(Version(version))
-          except (KeyError, TypeError, ValueError, InvalidVersion):
-              raise SystemExit("::error::the matrix must contain a valid release_version")
+  #         package_name = os.environ["PACKAGE_NAME"]
+  #         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", package_name):
+  #             raise SystemExit("::error::package_name must be a valid Python package name")
+  #         try:
+  #             entries = json.loads(os.environ["MATRIX_JSON"])["include"]
+  #             if not isinstance(entries, list) or not entries:
+  #                 raise ValueError
+  #             expected = set()
+  #             for entry in entries:
+  #                 version = entry["release_version"]
+  #                 if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!\-]*", version):
+  #                     raise ValueError
+  #                 expected.add(Version(version))
+  #         except (KeyError, TypeError, ValueError, InvalidVersion):
+  #             raise SystemExit("::error::the matrix must contain a valid release_version")
 
-          found = set()
-          for filename in sys.argv[1:]:
-              archive = Path(filename)
-              if not archive.is_file() or archive.is_symlink():
-                  raise SystemExit("::error::sdist archives must be regular files, not symlinks")
-              if not archive.stat().st_size:
-                  raise SystemExit("::error::sdist archives must not be empty")
-              if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!\-]*\.tar\.gz", archive.name):
-                  raise SystemExit("::error::invalid sdist file name or version")
-              try:
-                  name, version = parse_sdist_filename(archive.name)
-              except (InvalidSdistFilename, InvalidVersion):
-                  raise SystemExit("::error::invalid sdist file name or version")
-              if name != canonicalize_name(package_name):
-                  raise SystemExit("::error::the sdist package name does not match package_name")
-              if version not in expected or version in found:
-                  raise SystemExit("::error::the sdist version is not in the matrix or is duplicated")
-              found.add(version)
-          if found != expected:
-              raise SystemExit("::error::the sdists are missing a release_version from the matrix")
-          PY
+  #         found = set()
+  #         for filename in sys.argv[1:]:
+  #             archive = Path(filename)
+  #             if not archive.is_file() or archive.is_symlink():
+  #                 raise SystemExit("::error::sdist archives must be regular files, not symlinks")
+  #             if not archive.stat().st_size:
+  #                 raise SystemExit("::error::sdist archives must not be empty")
+  #             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!\-]*\.tar\.gz", archive.name):
+  #                 raise SystemExit("::error::invalid sdist file name or version")
+  #             try:
+  #                 name, version = parse_sdist_filename(archive.name)
+  #             except (InvalidSdistFilename, InvalidVersion):
+  #                 raise SystemExit("::error::invalid sdist file name or version")
+  #             if name != canonicalize_name(package_name):
+  #                 raise SystemExit("::error::the sdist package name does not match package_name")
+  #             if version not in expected or version in found:
+  #                 raise SystemExit("::error::the sdist version is not in the matrix or is duplicated")
+  #             found.add(version)
+  #         if found != expected:
+  #             raise SystemExit("::error::the sdists are missing a release_version from the matrix")
+  #         PY
 
-          for archive in "${archives[@]}"; do
-            twine upload --repository-url "$ARTIFACTORY_URL" \
-              --verbose --disable-progress-bar --non-interactive "$archive"
-            printf 'Uploaded sdist %s\n' "${archive##*/}"
-          done
+  #         for archive in "${archives[@]}"; do
+  #           twine upload --repository-url "$ARTIFACTORY_URL" \
+  #             --verbose --disable-progress-bar --non-interactive "$archive"
+  #           printf 'Uploaded sdist %s\n' "${archive##*/}"
+  #         done
 
-  update-metadata:
-    name: Update metadata
-    needs: [prepare-matrix, publish-sdist]
-    # Allow a successful publish when some wheels failed; skip the update when the sdist was not actually uploaded, failed, or was cancelled.
-    if: ${{ !cancelled() && needs.prepare-matrix.outputs.should_release == 'true' && needs.publish-sdist.result == 'success' && needs.publish-sdist.outputs.published == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out metadata tools
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.template_repository }}
-          ref: ${{ inputs.template_ref }}
-          path: ci-template
-          token: ${{ secrets.template_token || github.token }}
-          persist-credentials: false
+  # update-metadata:
+  #   name: Update metadata
+  #   needs: [prepare-matrix, publish-sdist]
+  #   # Allow a successful publish when some wheels failed; skip the update when the sdist was not actually uploaded, failed, or was cancelled.
+  #   if: ${{ !cancelled() && needs.prepare-matrix.outputs.should_release == 'true' && needs.publish-sdist.result == 'success' && needs.publish-sdist.outputs.published == 'true' }}
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 15
+  #   steps:
+  #     - name: Check out metadata tools
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: ${{ inputs.template_repository }}
+  #         ref: ${{ inputs.template_ref }}
+  #         path: ci-template
+  #         token: ${{ secrets.template_token || github.token }}
+  #         persist-credentials: false
 
-      - name: Set up Python for metadata update
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+  #     - name: Set up Python for metadata update
+  #       uses: actions/setup-python@v5
+  #       with:
+  #         python-version: '3.12'
 
-      - name: Install metadata dependencies
-        shell: bash
-        run: python -m pip install --no-input requests packaging
+  #     - name: Install metadata dependencies
+  #       shell: bash
+  #       run: python -m pip install --no-input requests packaging
 
-      - name: Generate and upload index.json
-        shell: bash
-        env:
-          PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
-          RELEASE_USERNAME: ${{ secrets.release_username }}
-          RELEASE_TOKEN: ${{ secrets.release_token }}
-        run: python ci-template/ci-templates/release-pypi/scripts/get_metadata.py
+  #     - name: Generate and upload index.json
+  #       shell: bash
+  #       env:
+  #         PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
+  #         RELEASE_USERNAME: ${{ secrets.release_username }}
+  #         RELEASE_TOKEN: ${{ secrets.release_token }}
+  #       run: python ci-template/ci-templates/release-pypi/scripts/get_metadata.py
 
-  post-release-data:
-    name: Post release data
-    needs: [prepare-matrix, update-metadata]
-    # Post only after the metadata update succeeds; the explicit status function lets a partially failed matrix release continue.
-    if: ${{ !cancelled() && needs.prepare-matrix.outputs.should_release == 'true' && needs.update-metadata.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Download release data for this run attempt
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ${{ needs.prepare-matrix.outputs.package_name }}-release-data-${{ github.run_id }}-${{ github.run_attempt }}-*
-          path: release-data
-          merge-multiple: true
+  # post-release-data:
+  #   name: Post release data
+  #   needs: [prepare-matrix, update-metadata]
+  #   # Post only after the metadata update succeeds; the explicit status function lets a partially failed matrix release continue.
+  #   if: ${{ !cancelled() && needs.prepare-matrix.outputs.should_release == 'true' && needs.update-metadata.result == 'success' }}
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 15
+  #   steps:
+  #     - name: Download release data for this run attempt
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         pattern: ${{ needs.prepare-matrix.outputs.package_name }}-release-data-${{ github.run_id }}-${{ github.run_attempt }}-*
+  #         path: release-data
+  #         merge-multiple: true
 
-      - name: Check out release data tools
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.template_repository }}
-          ref: ${{ inputs.template_ref }}
-          path: ci-template
-          token: ${{ secrets.template_token || github.token }}
-          persist-credentials: false
+  #     - name: Check out release data tools
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: ${{ inputs.template_repository }}
+  #         ref: ${{ inputs.template_ref }}
+  #         path: ci-template
+  #         token: ${{ secrets.template_token || github.token }}
+  #         persist-credentials: false
 
-      - name: Set up Python for release data
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+  #     - name: Set up Python for release data
+  #       uses: actions/setup-python@v5
+  #       with:
+  #         python-version: '3.12'
 
-      - name: Install release data dependencies
-        shell: bash
-        run: python -m pip install --no-input requests cryptography
+  #     - name: Install release data dependencies
+  #       shell: bash
+  #       run: python -m pip install --no-input requests cryptography
 
-      - name: Post release data one by one
-        shell: bash
-        env:
-          PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
-          CLIENT_PRIVATE_KEY_B64: ${{ secrets.data_token }}
-        run: python ci-template/ci-templates/release-pypi/scripts/post_data.py --input-dir release-data
+  #     - name: Post release data one by one
+  #       shell: bash
+  #       env:
+  #         PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
+  #         CLIENT_PRIVATE_KEY_B64: ${{ secrets.data_token }}
+  #       run: python ci-template/ci-templates/release-pypi/scripts/post_data.py --input-dir release-data
