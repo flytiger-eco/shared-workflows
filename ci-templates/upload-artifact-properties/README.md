@@ -74,34 +74,34 @@ All inputs have type `string`.
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `artifact_name` | Yes | None | Name of the artifact saved by the caller using `actions/upload-artifact@v4`; must belong to the current workflow run. |
-| `version` | No | `{package_version}+{short_commit}.ppu{sdk_version}` | Used as-is when passed explicitly; generated when omitted or when an empty string is passed. The final value is used for both the upload path and the same-named Properties; `short_commit` is the first 7 characters of the caller's `GITHUB_SHA`. |
+| `version` | No | `{package_version}+{short_commit}.ppu{sdk_version}` | Used as-is when passed explicitly; generated when omitted or when an empty string is passed. The final value is used for both the upload path and the same-named Properties; `short_commit` is the first 7 characters of the caller's `GITHUB_SHA`; the `.ppu{sdk_version}` suffix is omitted when `sdk_version` is empty. |
 | `template_repository` | No | `flytiger-eco/shared-workflows` | Repository containing the template script, in `owner/repo` format. |
 | `template_ref` | Yes | None | Template script version; must match the workflow version referenced by `uses`. |
 
 ### Version Selection and Properties
 
 - When a non-empty `version` is passed explicitly, it is used as-is, without appending a commit number or SDK suffix.
-- When `version` is omitted or an empty string is passed, `{package_version}+{short_commit}.ppu{sdk_version}` is used. For example, with `package_version=1.2.3`, caller SHA `abcdef1234567890`, and `sdk_version=2.2.0`, the result is `1.2.3+abcdef1.ppu2.2.0`.
+- When `version` is omitted or an empty string is passed, `{package_version}+{short_commit}.ppu{sdk_version}` is used. For example, with `package_version=1.2.3`, caller SHA `abcdef1234567890`, and `sdk_version=2.2.0`, the result is `1.2.3+abcdef1.ppu2.2.0`. When `sdk_version` is omitted or empty, the `.ppu{sdk_version}` suffix is dropped and the result is `1.2.3+abcdef1`.
 - `short_commit` uses the first 7 characters of the caller's `${{ github.sha }}`, never the commit checked out by the template, and a same-named input cannot override it; when generating automatically, the SHA must be a hexadecimal string of at least 7 characters.
 - The final `version` is used for the upload URL, the Properties API path, and the `version` property. The `+` in the URL is encoded as `%2B`, while the property keeps the raw version value; the `package_version` property keeps the caller's original value.
-- Both explicit and auto-generated versions go through single-segment path validation: it must start with a letter or digit and may only contain letters, digits, dots, underscores, hyphens, and plus signs, with a total length of at most 255 characters. Whitespace-only or invalid explicit versions fail instead of silently falling back; during auto-generation, `package_version` and `sdk_version` must also satisfy the same single-segment validation.
+- Both explicit and auto-generated versions go through single-segment path validation: it must start with a letter or digit and may only contain letters, digits, dots, underscores, hyphens, and plus signs, with a total length of at most 255 characters. Whitespace-only or invalid explicit versions fail instead of silently falling back; during auto-generation, `package_version` and any non-empty `sdk_version` must also satisfy the same single-segment validation.
 
 ### Property Inputs
 
-Every field below is written as an Artifactory item property with the same name. Pass an empty string when a value does not apply; the property is still set with an empty value except for the required fields listed in the file selection section.
+Every field below is written as an Artifactory item property with the same name. Omit the input or pass an empty string when a value does not apply; the property is still set with an empty value. "Yes (pypi)" marks fields that are optional in general but must be non-empty when `package_type` is `pypi`.
 
 | Input | Required | Description |
 | --- | --- | --- |
-| `package_type` | Yes | Package type, such as `wheel`, `sdist`, `docker`, or `raw`. |
+| `package_type` | Yes | Package type, such as `pypi`, `wheel`, `sdist`, `docker`, or `raw`. `pypi` additionally requires `os`, `python_version`, `runtime`, `sdk_version`, and `package_edition`. |
 | `package_name` | Yes | Package name. |
 | `package_version` | Yes | Package version, typically matching the released distribution. |
-| `os` | Yes | Operating system, such as `ubuntu24.04`. |
-| `python_version` | Yes | Python version, such as `3.12`. |
+| `os` | Yes (pypi) | Operating system, such as `ubuntu24.04`. |
+| `python_version` | Yes (pypi) | Python version, such as `3.12`. |
 | `runtime_type` | No | Runtime type; defaults to `cuda` when not provided, and an explicitly passed value is written as-is to the same-named Properties (for example `rocm` or `cpu`). Does not affect `runtime`, the upload path, or version generation. |
-| `runtime` | Yes | Runtime version, such as a CUDA version. |
-| `torch_version` | Yes | PyTorch version; pass an empty string when Torch is not applicable. |
-| `sdk_version` | Yes | SDK version. |
-| `package_edition` | Yes | Package edition, such as `standard` or `enterprise`. |
+| `runtime` | Yes (pypi) | Runtime version, such as a CUDA version. |
+| `torch_version` | No | PyTorch version; omit or pass an empty string when Torch is not applicable. |
+| `sdk_version` | Yes (pypi) | SDK version; when empty, the auto-generated `version` has no `.ppu{sdk_version}` suffix. |
+| `package_edition` | Yes (pypi) | Package edition, such as `standard` or `enterprise`. |
 | `extra_info` | No | Free-form extra information, such as a JSON string. |
 
 The query uses `properties=key1=value1;key2=value2`. Each field remains a single property value: literal commas, backslashes, pipes, and equals signs are backslash-escaped according to the Artifactory protocol before URL encoding. For example, `1=1` becomes `1%5C%3D1`, and `a,b` becomes `a%5C%2Cb`. Semicolons and other URL-sensitive characters inside values are percent-encoded; only the separators between property pairs remain literal semicolons.
@@ -144,7 +144,7 @@ The template passes `artifact_name` to the official Action's `name` parameter to
 
 The uploaded object is the raw ZIP saved by the official Action, not the files inside the ZIP. The internal directory structure, filenames, and contents stay inside the raw ZIP, and the ZIP contents are never unpacked or executed on the runner. The template rejects a blank `artifact_name`. All Properties (including `version`, `run_id`, `run_attempt`, and `runtime_type`) are set on the ZIP artifact; `package_type` keeps the value passed by the caller and is not automatically changed to `zip`.
 
-`artifact_name` and every non-optional property must be non-empty; `torch_version` and `extra_info` may be empty. The `version` input may be omitted, but the final version must pass the validation described above; on failure the run stops before any PUT request is sent. Among the context-derived properties, `commit` and `log_url` must be non-empty and `run_id` and `run_attempt` must be positive integer strings, while `branch` and `tag` may be empty depending on the trigger type.
+`artifact_name`, `package_type`, `package_name`, and `package_version` must always be non-empty; when `package_type` is `pypi`, `os`, `python_version`, `runtime`, `sdk_version`, and `package_edition` must also be non-empty. For other package types these five fields, as well as `torch_version` and `extra_info`, may be empty. The `version` input may be omitted, but the final version must pass the validation described above; on failure the run stops before any PUT request is sent. Among the context-derived properties, `commit` and `log_url` must be non-empty and `run_id` and `run_attempt` must be positive integer strings, while `branch` and `tag` may be empty depending on the trigger type.
 
 ## Upload and Failure Behavior
 

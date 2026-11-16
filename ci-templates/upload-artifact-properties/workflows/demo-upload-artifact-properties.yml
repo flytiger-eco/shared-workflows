@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Optional version; when empty, generated as {package_version}+{short_commit}.ppu{sdk_version}, where short_commit is the first 7 characters of the caller SHA'
+        description: 'Optional version; when empty, generated as {package_version}+{short_commit}.ppu{sdk_version}, where short_commit is the first 7 characters of the caller SHA; the .ppu{sdk_version} suffix is omitted when sdk_version is empty'
         required: false
         type: string
         default: ''

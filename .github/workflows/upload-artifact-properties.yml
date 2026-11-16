@@ -14,12 +14,12 @@ on:
         required: true
         type: string
       version:
-        description: 'Version shared by the upload path and the same-named property; when empty, generated as {package_version}+{short_commit}.ppu{sdk_version}, where short_commit is the first 7 characters of the caller SHA'
+        description: 'Version shared by the upload path and the same-named property; when empty, generated as {package_version}+{short_commit}.ppu{sdk_version}, where short_commit is the first 7 characters of the caller SHA; the .ppu{sdk_version} suffix is omitted when sdk_version is empty'
         required: false
         type: string
         default: ''
       package_type:
-        description: 'Artifactory item property: package type, such as wheel, sdist, docker, or raw'
+        description: 'Artifactory item property: package type, such as pypi, wheel, sdist, docker, or raw; pypi additionally requires os, python_version, runtime, sdk_version, and package_edition'
         required: true
         type: string
       package_name:
@@ -31,12 +31,12 @@ on:
         required: true
         type: string
       os:
-        description: 'Artifactory item property: operating system, such as ubuntu24.04'
-        required: true
+        description: 'Artifactory item property: operating system, such as ubuntu24.04; required when package_type is pypi'
+        required: false
         type: string
       python_version:
-        description: 'Artifactory item property: Python version, such as 3.12'
-        required: true
+        description: 'Artifactory item property: Python version, such as 3.12; required when package_type is pypi'
+        required: false
         type: string
       runtime_type:
         description: 'Runtime type property; defaults to cuda when not provided and uses the given value as-is otherwise'
@@ -44,20 +44,20 @@ on:
         type: string
         default: 'cuda'
       runtime:
-        description: 'Artifactory item property: runtime version, such as CUDA 13.0.0'
-        required: true
+        description: 'Artifactory item property: runtime version, such as CUDA 13.0.0; required when package_type is pypi'
+        required: false
         type: string
       torch_version:
-        description: 'Artifactory item property: PyTorch version; pass an empty string when Torch is not applicable'
-        required: true
+        description: 'Artifactory item property: PyTorch version; omit or pass an empty string when Torch is not applicable'
+        required: false
         type: string
       sdk_version:
-        description: 'Artifactory item property: SDK version'
-        required: true
+        description: 'Artifactory item property: SDK version; required when package_type is pypi'
+        required: false
         type: string
       package_edition:
-        description: 'Artifactory item property: package edition, such as standard or enterprise'
-        required: true
+        description: 'Artifactory item property: package edition, such as standard or enterprise; required when package_type is pypi'
+        required: false
         type: string
       extra_info:
         description: 'Artifactory item property: free-form extra information, such as a JSON string; values are escaped for Artifactory and URL-encoded'

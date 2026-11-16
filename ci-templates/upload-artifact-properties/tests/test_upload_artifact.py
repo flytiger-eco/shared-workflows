@@ -63,6 +63,8 @@ PROPERTY_ORDER = (
     "tag", "commit", "log_url", "run_id", "run_attempt", "extra_info",
 )
 CONTEXT_SOURCED_PROPERTIES = ("branch", "tag", "commit", "log_url", "run_id", "run_attempt")
+# Optional in general but required when package_type is pypi.
+PYPI_REQUIRED_PROPERTIES = ("os", "python_version", "runtime", "sdk_version", "package_edition")
 INPUT_SOURCED_PROPERTIES = tuple(
     k for k in PROPERTY_ORDER if k not in (*CONTEXT_SOURCED_PROPERTIES, "version")
 )
@@ -366,8 +368,11 @@ def test_default_version_is_shared_by_all_files_paths_properties_and_outputs(
     )
 
 
-@pytest.mark.parametrize("key", ["package_version", "sdk_version"])
-@pytest.mark.parametrize("value", [None, "", " ", "../other", "v1/other", "v1?x=1", 123, "v" * 250])
+@pytest.mark.parametrize("key,value", [
+    *(("package_version", value) for value in
+      (None, "", " ", "../other", "v1/other", "v1?x=1", 123, "v" * 250)),
+    *(("sdk_version", value) for value in (" ", "../other", "v1/other", "v1?x=1", 123, "v" * 250)),
+])
 def test_invalid_default_version_components_stop_before_upload(key, value, make_file, run_upload, workspace):
     make_file()
     code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, version="", **{key: value}))
@@ -376,14 +381,29 @@ def test_invalid_default_version_components_stop_before_upload(key, value, make_
     assert not (workspace / "outputs").exists()
 
 
-@pytest.mark.parametrize("key", ["package_version", "sdk_version"])
-def test_missing_default_version_component_stops_before_upload(key, make_file, run_upload):
+def test_missing_default_version_component_stops_before_upload(make_file, run_upload):
     make_file()
     inputs = dict(DEFAULT_INPUTS, version="")
-    del inputs[key]
+    del inputs["package_version"]
     code, transport = run_upload(inputs=inputs)
     assert code == 1
     transport.assert_not_called()
+
+
+@pytest.mark.parametrize("override", [{"sdk_version": ""}, {"sdk_version": None}, {}])
+def test_default_version_omits_sdk_suffix_without_sdk_version(override, make_file, run_upload):
+    make_file()
+    inputs = dict(DEFAULT_INPUTS, version="")
+    del inputs["sdk_version"]
+    inputs.update(override)
+    code, transport = run_upload(inputs=inputs)
+    assert code == 0
+    upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert upload_url == f"{BASE_URL}/{CALLER_REPOSITORY}/1.2.3%2Babcdef1/{DEMO_FILENAME}"
+    assert _query_pairs(storage_url) == dict(
+        expected_property_values(), version="1.2.3+abcdef1", sdk_version="",
+    )
 
 
 @pytest.mark.parametrize("sha", ["", "123456", "not-hex", "abcdef1/other", "abcdef1\n"])
@@ -571,17 +591,44 @@ def test_upload_destination_cannot_be_overridden_by_inputs(make_file, run_upload
     assert storage_url.partition("?")[0] == STORAGE_DIR + DEMO_FILENAME
 
 
-@pytest.mark.parametrize("key", [
-    "package_type", "package_name", "package_version", "os", "python_version",
-    "runtime", "sdk_version", "package_edition",
-])
-def test_missing_required_input_property_stops_before_upload(key, make_file, run_upload):
+@pytest.mark.parametrize("package_type", ["raw", "pypi"])
+@pytest.mark.parametrize("key", ["package_type", "package_name", "package_version"])
+def test_missing_required_input_property_stops_before_upload(package_type, key, make_file, run_upload):
     make_file()
-    inputs = dict(DEFAULT_INPUTS)
+    inputs = dict(DEFAULT_INPUTS, package_type=package_type)
     del inputs[key]
     code, transport = run_upload(inputs=inputs)
     assert code == 1
     transport.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [None, ""])
+@pytest.mark.parametrize("key", PYPI_REQUIRED_PROPERTIES)
+def test_pypi_package_requires_build_metadata(key, value, make_file, run_upload, capsys):
+    make_file()
+    inputs = dict(DEFAULT_INPUTS, package_type="pypi")
+    del inputs[key]
+    if value is not None:
+        inputs[key] = value
+    code, transport = run_upload(inputs=inputs)
+    assert code == 1
+    transport.assert_not_called()
+    assert f"{key} must not be empty" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("package_type", ["raw", "wheel", "PyPI"])
+def test_non_pypi_package_allows_empty_build_metadata(package_type, make_file, run_upload):
+    make_file()
+    inputs = dict(DEFAULT_INPUTS, package_type=package_type)
+    for key in PYPI_REQUIRED_PROPERTIES:
+        del inputs[key]
+    code, transport = run_upload(inputs=inputs)
+    assert code == 0
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert _query_pairs(storage_url) == dict(
+        expected_property_values(), package_type=package_type,
+        **{key: "" for key in PYPI_REQUIRED_PROPERTIES},
+    )
 
 
 @pytest.mark.parametrize("key", ["commit", "log_url", "run_id", "run_attempt"])
@@ -746,8 +793,8 @@ def test_workflow_contract_and_step_order():
     assert contract["inputs"]["runtime_type"]["type"] == "string"
     assert contract["inputs"]["runtime_type"]["default"] == "cuda"
     for name in INPUT_SOURCED_PROPERTIES:
-        if name not in ("extra_info", "runtime_type"):
-            assert contract["inputs"][name]["required"] == "true", name
+        expected = "true" if name in ("package_type", "package_name", "package_version") else "false"
+        assert contract["inputs"][name]["required"] == expected, name
     for name in CONTEXT_SOURCED_PROPERTIES:
         assert name not in contract["inputs"], name
     assert "artifact_base_url" not in contract["inputs"]
@@ -958,6 +1005,8 @@ def test_nightly_contract_keeps_matrix_entry_and_adds_upload_metadata(nightly_wo
     expected_inputs = {**release_inputs, **{key: properties_inputs[key] for key in additions}}
     expected_inputs["sdk_versions"] = dict(release_inputs["sdk_versions"], default='["2.2.1"]')
     expected_inputs["package_type"] = {"type": "string", "required": "false", "default": "binary"}
+    # Nightly names its wheel artifacts with package_edition, so it stays required there.
+    expected_inputs["package_edition"] = {"type": "string", "required": "true"}
     expected_inputs["runs_on"] = {"type": "string", "required": "false", "default": "ubuntu-latest"}
     for name, expected in expected_inputs.items():
         for field in ("type", "required", "default"):

@@ -57,22 +57,27 @@ CONTEXT_PROPERTY_ENV = {
     "run_id": "GITHUB_RUN_ID",
     "run_attempt": "GITHUB_RUN_ATTEMPT",
 }
-# Fields that must be present for the uploaded artifact to be identifiable. Optional
+# Fields that must be present for every uploaded artifact to be identifiable. Optional
 # metadata (torch_version, branch, tag, extra_info) is still sent as an empty property.
 REQUIRED_PROPERTY_KEYS = frozenset({
     "package_type",
     "package_name",
     "package_version",
     "version",
+    "commit",
+    "log_url",
+    "run_id",
+    "run_attempt",
+})
+# Build metadata required only when package_type is pypi; for other package types these
+# fields are optional and an omitted value is still sent as an empty property.
+PYPI_PACKAGE_TYPE = "pypi"
+PYPI_REQUIRED_PROPERTY_KEYS = frozenset({
     "os",
     "python_version",
     "runtime",
     "sdk_version",
     "package_edition",
-    "commit",
-    "log_url",
-    "run_id",
-    "run_attempt",
 })
 
 SEGMENT_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._+\-]{0,254}"
@@ -105,13 +110,14 @@ def resolve_version(inputs, env):
         package_version = validate_segment(
             "package_version", string_input(inputs, "package_version"), SEGMENT_PATTERN,
         )
-        sdk_version = validate_segment(
-            "sdk_version", string_input(inputs, "sdk_version"), SEGMENT_PATTERN,
-        )
+        sdk_version = string_input(inputs, "sdk_version", "")
         commit = env.get("GITHUB_SHA", "")
         if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{7,}", commit):
             raise ValueError("GITHUB_SHA must contain at least 7 hexadecimal characters to derive version")
-        version = f"{package_version}+{commit[:7]}.ppu{sdk_version}"
+        version = f"{package_version}+{commit[:7]}"
+        # The .ppu{sdk_version} suffix is appended only when an SDK version is provided.
+        if sdk_version:
+            version += f".ppu{validate_segment('sdk_version', sdk_version, SEGMENT_PATTERN)}"
     return validate_segment("version", version, SEGMENT_PATTERN)
 
 
@@ -137,6 +143,9 @@ def find_files(root):
 
 
 def build_property_query(inputs, env):
+    required_keys = REQUIRED_PROPERTY_KEYS
+    if inputs.get("package_type") == PYPI_PACKAGE_TYPE:
+        required_keys = required_keys | PYPI_REQUIRED_PROPERTY_KEYS
     pairs = []
     for key in PROPERTY_KEYS:
         if key in CONTEXT_PROPERTY_ENV:
@@ -149,7 +158,7 @@ def build_property_query(inputs, env):
                 value = ""
         if not isinstance(value, str):
             raise ValueError(f"{key} must be a string")
-        if key in REQUIRED_PROPERTY_KEYS and not value:
+        if key in required_keys and not value:
             raise ValueError(f"{key} must not be empty")
         if key in ("run_id", "run_attempt") and not re.fullmatch(POSITIVE_INT_PATTERN, value):
             raise ValueError(f"{CONTEXT_PROPERTY_ENV[key]} must be a positive integer")
