@@ -767,13 +767,45 @@ def test_property_response_requires_204(status, make_file, run_upload, uploader,
     assert "test-token" not in captured.out + captured.err
 
 
-def test_timeout_is_reported_without_leaking_credentials(make_file, run_upload, uploader, capsys):
+@pytest.mark.parametrize("failing_call,expected", [
+    (0, "Upload of demo.txt (7 bytes) timed out after 3900 s"),
+    (1, "Setting properties on " + STORAGE_DIR + "demo.txt timed out after 540 s"),
+])
+def test_timeout_is_reported_without_leaking_credentials(
+    failing_call, expected, make_file, run_upload, uploader, workspace, capsys,
+):
     make_file()
-    uploader.subprocess.run.side_effect = subprocess.TimeoutExpired(["curl", "test-token"], 1500)
-    assert run_upload()[0] == 1
+    responses = [subprocess.CompletedProcess([], 0, "201", None)]
+    responses = responses[:failing_call] + [subprocess.TimeoutExpired(["curl", "test-token"], 1)]
+    uploader.subprocess.run.side_effect = responses
+    code, transport = run_upload()
+    assert code == 1
+    assert transport.call_args.kwargs["timeout"] == (3900, 540)[failing_call]
+    assert not (workspace / "outputs").exists()
     captured = capsys.readouterr()
-    assert "timed out" in captured.err
+    assert f"::error::{expected}" in captured.err
     assert "test-token" not in captured.out + captured.err
+
+
+def test_curl_limits_fit_inside_the_hard_timeouts_and_job_timeout(make_file, run_upload, uploader, capsys):
+    make_file()
+    code, transport = run_upload()
+    assert code == 0
+    upload_call, property_call = transport.call_args_list
+    for call, max_time in ((upload_call, "3600"), (property_call, "120")):
+        args = call.args[0]
+        assert args[args.index("--max-time") + 1] == max_time
+        assert args[args.index("--retry-max-time") + 1] == max_time
+        assert args[args.index("--speed-limit") + 1] == "1024"
+        assert args[args.index("--speed-time") + 1] == "300"
+        assert call.kwargs["stdout"] == subprocess.PIPE
+        assert "stderr" not in call.kwargs and "capture_output" not in call.kwargs
+    assert upload_call.kwargs["timeout"] == 3900 > 3600
+    assert property_call.kwargs["timeout"] == 540 > 4 * 120
+    assert 3900 + 540 < 90 * 60
+    out = capsys.readouterr().out
+    assert f"Uploading demo.txt (7 bytes) to {UPLOAD_DIR}demo.txt" in out
+    assert "Upload finished in " in out
 
 
 def test_workflow_contract_and_step_order():
@@ -806,7 +838,7 @@ def test_workflow_contract_and_step_order():
     assert workflow["permissions"] == {"contents": "read"}
     job = workflow["jobs"]["upload-artifact"]
     assert job["runs-on"] == "ubuntu-latest"
-    assert job["timeout-minutes"] == "30"
+    assert job["timeout-minutes"] == "90"
     guard, checkout, setup, download, upload = job["steps"]
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"] == {

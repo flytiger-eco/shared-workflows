@@ -98,7 +98,7 @@ jobs:
   upload-artifact:
     name: Upload artifact files and set properties
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     outputs:
       batch_url: ${{ steps.upload.outputs.batch_url }}
       upload_urls: ${{ steps.upload.outputs.upload_urls }}

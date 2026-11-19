@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from urllib.parse import quote
 
 
@@ -82,9 +83,19 @@ PYPI_REQUIRED_PROPERTY_KEYS = frozenset({
 
 SEGMENT_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._+\-]{0,254}"
 POSITIVE_INT_PATTERN = r"[1-9][0-9]*"
-UPLOAD_TIMEOUT = 600
+CURL_RETRIES = 3
+# Large ZIPs may legitimately take longer than any fixed per-attempt cap, so uploads are
+# bounded by stall detection (below STALL_SPEED_LIMIT bytes/s for STALL_SPEED_TIME seconds)
+# instead of restarting from zero every few minutes. STALL_SPEED_TIME also leaves room for
+# Artifactory to checksum and store a large body before it responds.
+STALL_SPEED_LIMIT = 1024
+STALL_SPEED_TIME = 300
+UPLOAD_TIMEOUT = 3600
 PROPERTY_TIMEOUT = 120
-CURL_HARD_TIMEOUT = 1500
+# The Python-side timeouts are a last-resort guard above curl's own limits so curl
+# normally fails first and reports its exit code.
+UPLOAD_HARD_TIMEOUT = UPLOAD_TIMEOUT + 300
+PROPERTY_HARD_TIMEOUT = (CURL_RETRIES + 1) * PROPERTY_TIMEOUT + 60
 
 
 def string_input(inputs, key, default=None):
@@ -188,50 +199,67 @@ def build_context(inputs, github_repository):
     )
 
 
-def _run_curl(extra_args, request_timeout, expected_status=None):
-    result = subprocess.run(
-        [
-            "curl", "--disable", "--fail", "--silent", "--show-error", "--retry", "3",
-            "--connect-timeout", "30", "--max-time", str(request_timeout),
-            "--proto", "=https", "--output", os.devnull,
-            "--write-out", "%{http_code}", *extra_args,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=CURL_HARD_TIMEOUT,
-        check=False,
-    )
-    status = result.stdout.strip()
+def _run_curl(description, extra_args, request_timeout, hard_timeout, expected_status=None):
+    started = time.monotonic()
+    try:
+        # stderr is inherited so curl's retry warnings and error reasons appear in the job
+        # log; curl never prints the --user value.
+        result = subprocess.run(
+            [
+                "curl", "--disable", "--fail", "--silent", "--show-error",
+                "--retry", str(CURL_RETRIES), "--retry-max-time", str(request_timeout),
+                "--connect-timeout", "30", "--max-time", str(request_timeout),
+                "--speed-limit", str(STALL_SPEED_LIMIT), "--speed-time", str(STALL_SPEED_TIME),
+                "--proto", "=https", "--output", os.devnull,
+                "--write-out", "%{http_code}", *extra_args,
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+            timeout=hard_timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"{description} timed out after {hard_timeout} s") from None
+    elapsed = time.monotonic() - started
+    status = (result.stdout or "").strip()
     if result.returncode or not re.fullmatch(r"2[0-9]{2}", status):
         safe_status = status if re.fullmatch(r"[0-9]{3}", status) else "unknown"
         raise ValueError(
-            f"Artifactory request failed: curl exit code {result.returncode}, HTTP {safe_status}"
+            f"{description} failed after {elapsed:.0f} s: curl exit code {result.returncode}, HTTP {safe_status}"
         )
     if expected_status is not None and status != expected_status:
-        raise ValueError(f"Artifactory request returned HTTP {status}; expected HTTP {expected_status}")
+        raise ValueError(f"{description} returned HTTP {status}; expected HTTP {expected_status}")
+    return elapsed
 
 
 def upload_file(path, url, username, token):
-    _run_curl(
+    size = path.stat().st_size
+    print(f"Uploading {path.name} ({size} bytes) to {url}", flush=True)
+    elapsed = _run_curl(
+        f"Upload of {path.name} ({size} bytes)",
         [
             "--user", f"{username}:{token}",
             "--upload-file", str(path.resolve()),
             "--", url,
         ],
         UPLOAD_TIMEOUT,
+        UPLOAD_HARD_TIMEOUT,
     )
+    print(f"Upload finished in {elapsed:.0f} s", flush=True)
     return url
 
 
 def set_properties(storage_url, query, username, token):
     # PUT an empty body against /api/storage so only the query string carries the payload.
     _run_curl(
+        f"Setting properties on {storage_url}",
         [
             "--user", f"{username}:{token}",
             "--upload-file", os.devnull,
             "--", f"{storage_url}?{query}&recursive=0",
         ],
         PROPERTY_TIMEOUT,
+        PROPERTY_HARD_TIMEOUT,
         expected_status="204",
     )
 
@@ -282,9 +310,6 @@ def main():
             upload_urls.append(file_url)
         write_outputs(batch_url, upload_urls)
         print(f"Uploaded {len(upload_urls)} files to: {batch_url}")
-    except subprocess.TimeoutExpired:
-        print("::error::Artifactory request timed out", file=sys.stderr)
-        return 1
     except (ValueError, OSError, RuntimeError) as error:
         message = str(error).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
         print(f"::error::{message}", file=sys.stderr)
