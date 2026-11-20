@@ -119,6 +119,8 @@ Every uploaded wheel receives the same eight properties. `repo`, `commit`, `bran
 
 `run_id` and `run_attempt` must be positive integers. These three fields cannot be overridden by caller inputs; the source metadata still describes the original build.
 
+For compatibility with older workflow wrappers, when `GITHUB_LOG_URL` is missing, empty, or whitespace-only, the script builds `log_url` from the runner's native `GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, and `GITHUB_RUN_ID` variables. A non-empty `GITHUB_LOG_URL` takes precedence. The native server URL is preserved, including on GitHub Enterprise, and trailing slashes are removed before joining the path. `run_id` and `run_attempt` already use the native `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` variables and do not need an explicit step-level `env` declaration. Missing source inputs still remain empty; the compatibility logic never infers the actual build repository or commit from the triggering context. Missing both the explicit link and native context remains an error before uploading. Keep workflow and script refs aligned as described above; this fallback only handles the missing log-link variable.
+
 For each wheel, an empty-body PUT sets the properties using:
 
 ```text

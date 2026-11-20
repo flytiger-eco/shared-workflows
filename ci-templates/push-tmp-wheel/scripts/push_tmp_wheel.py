@@ -35,7 +35,16 @@ def build_property_query(env):
     if properties["commit"] and not re.fullmatch(r"[0-9a-fA-F]{40}", properties["commit"]):
         raise ValueError("commit must be a full 40-character hexadecimal SHA when provided")
     if not properties["log_url"].strip():
-        raise ValueError("GITHUB_LOG_URL must not be empty")
+        # Older workflow wrappers do not inject GITHUB_LOG_URL; use the runner's native context.
+        server_url = env.get("GITHUB_SERVER_URL", "").strip().rstrip("/")
+        repository = env.get("GITHUB_REPOSITORY", "").strip()
+        run_id = properties["run_id"]
+        if server_url and repository and run_id:
+            properties["log_url"] = f"{server_url}/{repository}/actions/runs/{run_id}"
+    if not properties["log_url"].strip():
+        raise ValueError(
+            "GITHUB_LOG_URL must not be empty unless GITHUB_SERVER_URL, GITHUB_REPOSITORY, and GITHUB_RUN_ID are available"
+        )
     for key in ("run_id", "run_attempt"):
         if not re.fullmatch(r"[1-9][0-9]*", properties[key]):
             raise ValueError(f"{PROPERTY_ENV[key]} must be a positive integer")

@@ -67,7 +67,7 @@ def run_publish(publisher, workspace, monkeypatch):
     monkeypatch.setenv("GITHUB_LOG_URL", LOG_URL)
     monkeypatch.setenv("GITHUB_RUN_ID", "123456")
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
-    for key in ("SOURCE_BRANCH", "SOURCE_TAG", "EXTRA_INFO"):
+    for key in ("SOURCE_BRANCH", "SOURCE_TAG", "EXTRA_INFO", "GITHUB_SERVER_URL", "GITHUB_REPOSITORY"):
         monkeypatch.delenv(key, raising=False)
     transport = Mock(side_effect=lambda args, **kwargs: subprocess.CompletedProcess(
         [], 0, "204" if args[args.index("--upload-file") + 1] == os.devnull else "201", "",
@@ -394,6 +394,78 @@ def test_legacy_caller_without_new_inputs_still_uploads(make_wheel, run_publish,
         + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
     )
     assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
+
+
+@pytest.mark.parametrize("log_url", [None, "", " \n\t"])
+@pytest.mark.parametrize("server_url,expected_server", [
+    ("https://github.com", "https://github.com"),
+    ("https://github.com/", "https://github.com"),
+    ("https://github.example.com/", "https://github.example.com"),
+])
+def test_old_wrapper_uses_native_run_context_without_inventing_source(
+    log_url, server_url, expected_server, make_wheel, run_publish, monkeypatch, workspace,
+):
+    for filename in ("a.whl", "b.whl"):
+        make_wheel(filename=filename)
+    # Old wrappers supply no source fields or log-link variable; run metadata is native to the runner.
+    for key in ("SOURCE_REPO", "SOURCE_COMMIT", "SOURCE_BRANCH", "SOURCE_TAG", "EXTRA_INFO", "GITHUB_LOG_URL"):
+        monkeypatch.delenv(key, raising=False)
+    if log_url is not None:
+        monkeypatch.setenv("GITHUB_LOG_URL", log_url)
+    code, transport = run_publish(
+        GITHUB_SERVER_URL=server_url, GITHUB_REPOSITORY="ci-owner/ci-repo",
+        GITHUB_RUN_ID="44707911317", GITHUB_RUN_ATTEMPT="3",
+        GITHUB_SHA="0" * 40, GITHUB_REF_NAME="main",
+    )
+    assert code == 0
+    assert transport.call_count == 4
+    expected_log = f"{expected_server}/ci-owner/ci-repo/actions/runs/44707911317"
+    for call, filename in zip(transport.call_args_list[1::2], ("a.whl", "b.whl")):
+        assert call.args[0][-1] == (
+            STORAGE_URL + filename + "?properties=repo=;commit=;branch=;tag=;extra_info=;"
+            + f"log_url={quote(expected_log, safe='')};run_id=44707911317;run_attempt=3&recursive=0"
+        )
+    assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
+
+
+def test_explicit_log_url_takes_precedence_over_native_context(make_wheel, run_publish):
+    make_wheel()
+    code, transport = run_publish(
+        GITHUB_SERVER_URL="https://github.example.com", GITHUB_REPOSITORY="other-owner/other-repo",
+    )
+    assert code == 0
+    property_url = transport.call_args_list[1].args[0][-1]
+    assert f"log_url={quote(LOG_URL, safe='')};" in property_url
+    assert "github.example.com" not in unquote(property_url)
+
+
+@pytest.mark.parametrize("missing", ["GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"])
+def test_log_url_fallback_requires_complete_native_context(missing, make_wheel, run_publish, workspace, capsys):
+    make_wheel()
+    environment = {
+        "GITHUB_LOG_URL": "", "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_REPOSITORY": "ci-owner/ci-repo", "GITHUB_RUN_ID": "123456",
+    }
+    environment[missing] = ""
+    code, transport = run_publish(**environment)
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+    assert "GITHUB_LOG_URL must not be empty" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("key,value", [
+    ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ID", "abc"),
+    ("GITHUB_RUN_ATTEMPT", ""), ("GITHUB_RUN_ATTEMPT", "0"), ("GITHUB_RUN_ATTEMPT", "1.5"),
+])
+def test_log_url_fallback_does_not_bypass_run_identifier_validation(key, value, make_wheel, run_publish):
+    make_wheel()
+    code, transport = run_publish(
+        GITHUB_LOG_URL="", GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="ci-owner/ci-repo",
+        **{key: value},
+    )
+    assert code == 1
+    transport.assert_not_called()
 
 
 @pytest.mark.parametrize("status,returncode", [
