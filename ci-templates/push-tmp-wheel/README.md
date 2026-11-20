@@ -62,7 +62,7 @@ All inputs have type `string`.
 | `commit` | No | `''` | Full 40-character hexadecimal SHA from `git rev-parse HEAD` in the actual build source directory when provided. Empty when unknown. |
 | `branch` | No | `''` | Actual source branch; empty when unknown or not applicable, such as detached HEAD. |
 | `tag` | No | `''` | Tag pointing to the build commit; empty when none. Multiple tags may be passed as one comma-separated string. |
-| `extra_info` | No | `''` | Arbitrary extra information, including any JSON string; stored as a single property without parsing or reformatting. |
+| `extra_info` | No | `''` | Retained for caller compatibility; accepted but currently ignored and not written as an Artifactory property. |
 | `template_repository` | No | `flytiger-eco/shared-workflows` | Repository containing the template script, in `owner/repo` format. |
 | `template_ref` | Yes | None | Template script version; must match the workflow version referenced by `uses`. |
 
@@ -109,7 +109,7 @@ Filenames are percent-encoded in URLs; for example, `+` becomes `%2B`. No packag
 
 ## Artifactory Properties
 
-Every uploaded wheel receives the same eight properties. `repo`, `commit`, `branch`, `tag`, and `extra_info` come only from caller inputs. Optional fields are sent with empty values when omitted. The following three properties come directly from GitHub context and are not inputs:
+Every uploaded wheel receives the same seven properties. `repo`, `commit`, `branch`, and `tag` come only from caller inputs. Optional source fields are sent with empty values when omitted. Writing the `extra_info` property is currently suspended; the input remains accepted for compatibility, but its value is ignored and no `extra_info` property is sent, even with an empty value. Existing server properties are not deleted. The following three properties come directly from GitHub context and are not inputs:
 
 | Property | Source | Description |
 | --- | --- | --- |
@@ -124,10 +124,10 @@ For compatibility with older workflow wrappers, when `GITHUB_LOG_URL` is missing
 For each wheel, an empty-body PUT sets the properties using:
 
 ```text
-https://pkg.flytiger-eco.com/artifactory/api/storage/pypi_tmp/{timestamp}/{filename}?properties=repo=...;commit=...;branch=...;tag=...;extra_info=...;log_url=...;run_id=...;run_attempt=...&recursive=0
+https://pkg.flytiger-eco.com/artifactory/api/storage/pypi_tmp/{timestamp}/{filename}?properties=repo=...;commit=...;branch=...;tag=...;log_url=...;run_id=...;run_attempt=...&recursive=0
 ```
 
-The property request must return `204 No Content`. Values are escaped for Artifactory (backslashes, commas, pipes, and equals signs) and percent-encoded so JSON and ref names remain single property values. JSON is neither validated, expanded into separate properties, nor reformatted.
+The property request must return `204 No Content`. Values are escaped for Artifactory (backslashes, commas, pipes, and equals signs) and percent-encoded. `extra_info` is not included in the request.
 
 Example caller inputs, with source outputs recorded after checkout in the build job:
 

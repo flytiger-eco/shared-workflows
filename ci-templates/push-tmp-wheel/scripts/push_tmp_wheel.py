@@ -17,7 +17,6 @@ PROPERTY_ENV = {
     "commit": "SOURCE_COMMIT",
     "branch": "SOURCE_BRANCH",
     "tag": "SOURCE_TAG",
-    "extra_info": "EXTRA_INFO",
     "log_url": "GITHUB_LOG_URL",
     "run_id": "GITHUB_RUN_ID",
     "run_attempt": "GITHUB_RUN_ATTEMPT",

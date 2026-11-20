@@ -28,7 +28,7 @@ on:
         type: string
         default: ''
       extra_info:
-        description: 'Free-form extra information, including any JSON string; stored as one property without parsing or reformatting'
+        description: 'Reserved for compatibility; accepted but currently ignored and not written as an Artifactory property'
         required: false
         type: string
         default: ''

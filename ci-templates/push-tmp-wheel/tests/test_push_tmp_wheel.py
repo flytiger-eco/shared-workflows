@@ -329,7 +329,7 @@ def test_properties_use_explicit_source_and_current_run(make_wheel, run_publish)
     assert args[-1] == (
         STORAGE_URL + WHEEL_NAME + "?properties="
         + f"repo={quote(SOURCE_REPO, safe='')};commit={SOURCE_COMMIT};"
-        + "branch=release%2F1.2;tag=v1.2.3;extra_info=;"
+        + "branch=release%2F1.2;tag=v1.2.3;"
         + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
     )
     assert "workflow=" not in args[-1]
@@ -341,19 +341,24 @@ def test_properties_use_explicit_source_and_current_run(make_wheel, run_publish)
     '[1,{"nested":[false,null,"\\u2603"]}]',
     '"a=b,c|d\\\\e"',
     "null", "42", "", "  { }  ",
+    "build_tool=vllm-sail/scripts/build_wheels.sh;vllm_commit=abcdef0;image=registry/image:tag",
 ])
-def test_extra_info_is_one_escaped_property_without_reformatting(extra_info, make_wheel, run_publish):
-    make_wheel()
+def test_extra_info_is_accepted_but_not_written(extra_info, make_wheel, run_publish, publisher, workspace):
+    for name in ("a.whl", "b.whl"):
+        make_wheel(filename=name)
     code, transport = run_publish(EXTRA_INFO=extra_info)
     assert code == 0
-    url = transport.call_args_list[1].args[0][-1]
-    query = url.split("?properties=", 1)[1].removesuffix("&recursive=0")
-    pairs = dict(pair.split("=", 1) for pair in query.split(";"))
-    assert set(pairs) == {"repo", "commit", "branch", "tag", "extra_info", "log_url", "run_id", "run_attempt"}
-    escaped = "".join("\\" + char if char in "\\,|=" else char for char in extra_info)
-    assert unquote(pairs["extra_info"]) == escaped
-    assert pairs["branch"] == pairs["tag"] == ""
-    assert "%0A" in pairs["extra_info"] if "\n" in extra_info else True
+    assert transport.call_count == 4
+    assert "extra_info" not in publisher.PROPERTY_ENV
+    for call, filename in zip(transport.call_args_list[1::2], ("a.whl", "b.whl")):
+        url = call.args[0][-1]
+        assert url == (
+            STORAGE_URL + filename + "?properties="
+            + f"repo={quote(SOURCE_REPO, safe='')};commit={SOURCE_COMMIT};branch=;tag=;"
+            + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
+        )
+        assert "extra_info" not in url
+    assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
 
 
 @pytest.mark.parametrize("key,value", [
@@ -390,7 +395,7 @@ def test_legacy_caller_without_new_inputs_still_uploads(make_wheel, run_publish,
     assert code == 0
     assert transport.call_count == 2
     assert transport.call_args_list[1].args[0][-1] == (
-        STORAGE_URL + WHEEL_NAME + "?properties=repo=;commit=;branch=;tag=;extra_info=;"
+        STORAGE_URL + WHEEL_NAME + "?properties=repo=;commit=;branch=;tag=;"
         + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
     )
     assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
@@ -422,7 +427,7 @@ def test_old_wrapper_uses_native_run_context_without_inventing_source(
     expected_log = f"{expected_server}/ci-owner/ci-repo/actions/runs/44707911317"
     for call, filename in zip(transport.call_args_list[1::2], ("a.whl", "b.whl")):
         assert call.args[0][-1] == (
-            STORAGE_URL + filename + "?properties=repo=;commit=;branch=;tag=;extra_info=;"
+            STORAGE_URL + filename + "?properties=repo=;commit=;branch=;tag=;"
             + f"log_url={quote(expected_log, safe='')};run_id=44707911317;run_attempt=3&recursive=0"
         )
     assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
