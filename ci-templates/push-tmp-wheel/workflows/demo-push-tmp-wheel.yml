@@ -4,6 +4,17 @@ name: Demo Push Temporary Wheel
 # Manual runs actually publish to the temporary repository; run only on trusted branches.
 on:
   workflow_dispatch:
+    inputs:
+      source_repository:
+        description: 'Actual source repository to build, in owner/repo format; defaults to the caller repository'
+        required: false
+        type: string
+        default: ''
+      source_ref:
+        description: 'Source branch, tag, or commit; defaults to the selected workflow ref; set explicitly for another repository'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -15,13 +26,31 @@ jobs:
     timeout-minutes: 30
     outputs:
       artifact_name: tmp-wheel-${{ github.run_id }}-${{ github.run_attempt }}
+      repo: ${{ steps.source.outputs.repo }}
+      commit: ${{ steps.source.outputs.commit }}
+      branch: ${{ steps.source.outputs.branch }}
+      tag: ${{ steps.source.outputs.tag }}
     steps:
-      - name: Check out caller code
+      - name: Check out build source
         uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.source_repository || github.repository }}
+          ref: ${{ inputs.source_ref || github.ref }}
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
+
+      - name: Record actual build source
+        id: source
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ inputs.source_repository || github.repository }}
+        run: |
+          set -euo pipefail
+          printf 'repo=%s\n' "$SOURCE_REPO" >> "$GITHUB_OUTPUT"
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf 'branch=%s\n' "$(git symbolic-ref --quiet --short HEAD || true)" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$(git tag --points-at HEAD | paste -sd ',' -)" >> "$GITHUB_OUTPUT"
 
       - name: Set up build Python
         uses: actions/setup-python@v5
@@ -54,6 +83,11 @@ jobs:
     with:
       # Use the actual artifact name from the build job output, since run_attempt changes when rerunning only the publishing job.
       artifact_name: ${{ needs.build.outputs.artifact_name }}
+      repo: ${{ needs.build.outputs.repo }}
+      commit: ${{ needs.build.outputs.commit }}
+      branch: ${{ needs.build.outputs.branch }}
+      tag: ${{ needs.build.outputs.tag }}
+      extra_info: '{"build_tool":"python-build"}'
       template_repository: flytiger-eco/shared-workflows
       template_ref: main
     secrets:

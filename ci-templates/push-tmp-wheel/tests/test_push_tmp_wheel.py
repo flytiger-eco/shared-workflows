@@ -10,6 +10,7 @@ import sys
 import tempfile
 from unittest.mock import Mock
 from zipfile import ZipFile
+from urllib.parse import quote, unquote
 
 import pytest
 import yaml
@@ -20,6 +21,10 @@ SCRIPT = ROOT / "scripts/push_tmp_wheel.py"
 WORKFLOW = ROOT.parents[1] / ".github/workflows/push-tmp-wheel.yml"
 WHEEL_NAME = "demo_package-1.2.3-py3-none-any.whl"
 BATCH_URL = "https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-02-1211/"
+SOURCE_REPO = "source-owner/build-source"
+SOURCE_COMMIT = "abcdef0123456789" * 2 + "abcdef01"
+LOG_URL = "https://github.com/ci-owner/ci-repo/actions/runs/123456"
+STORAGE_URL = "https://pkg.flytiger-eco.com/artifactory/api/storage/pypi_tmp/2026-11-02-1211/"
 
 
 @pytest.fixture
@@ -57,7 +62,16 @@ def run_publish(publisher, workspace, monkeypatch):
     monkeypatch.setenv("RELEASE_USERNAME", "test-user")
     monkeypatch.setenv("RELEASE_TOKEN", "test-token")
     monkeypatch.setenv("GITHUB_OUTPUT", str(workspace / "outputs"))
-    transport = Mock(return_value=subprocess.CompletedProcess([], 0, "201", ""))
+    monkeypatch.setenv("SOURCE_REPO", SOURCE_REPO)
+    monkeypatch.setenv("SOURCE_COMMIT", SOURCE_COMMIT)
+    monkeypatch.setenv("GITHUB_LOG_URL", LOG_URL)
+    monkeypatch.setenv("GITHUB_RUN_ID", "123456")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    for key in ("SOURCE_BRANCH", "SOURCE_TAG", "EXTRA_INFO"):
+        monkeypatch.delenv(key, raising=False)
+    transport = Mock(side_effect=lambda args, **kwargs: subprocess.CompletedProcess(
+        [], 0, "204" if args[args.index("--upload-file") + 1] == os.devnull else "201", "",
+    ))
     monkeypatch.setattr(publisher.subprocess, "run", transport)
 
     def run(**environment):
@@ -72,8 +86,8 @@ def test_upload_is_exact_and_https_only(make_wheel, run_publish, workspace):
     before = path.read_bytes()
     code, transport = run_publish()
     assert code == 0
-    transport.assert_called_once()
-    args = transport.call_args.args[0]
+    assert transport.call_count == 2
+    args = transport.call_args_list[0].args[0]
     assert args[:2] == ["curl", "--disable"]
     assert args[args.index("--upload-file") + 1] == str(path)
     assert args[args.index("--user") + 1] == "test-user:test-token"
@@ -95,11 +109,16 @@ def test_all_nested_wheels_share_one_timestamp_across_minutes(make_wheel, run_pu
     code, transport = run_publish()
     assert code == 0
     publisher.datetime.now.assert_called_once_with(ZoneInfo("Asia/Shanghai"))
-    assert transport.call_count == 2
-    for call, path in zip(transport.call_args_list, sorted(paths)):
-        args = call.args[0]
+    assert transport.call_count == 4
+    queries = []
+    for index, path in enumerate(sorted(paths)):
+        args = transport.call_args_list[index * 2].args[0]
         assert args[args.index("--upload-file") + 1] == str(path)
         assert args[-1] == BATCH_URL + path.name
+        property_url = transport.call_args_list[index * 2 + 1].args[0][-1]
+        assert property_url.startswith(STORAGE_URL + path.name + "?properties=")
+        queries.append(property_url.split("?", 1)[1])
+    assert len(set(queries)) == 1
     assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
 
 
@@ -108,7 +127,7 @@ def test_timestamp_is_zero_padded_and_uses_24_hour_time(make_wheel, run_publish,
     publisher.datetime.now.return_value = datetime(2026, 1, 2, 23, 4, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
     code, transport = run_publish()
     assert code == 0
-    assert transport.call_args.args[0][-1].endswith("/2026-01-02-2304/" + WHEEL_NAME)
+    assert transport.call_args_list[0].args[0][-1].endswith("/2026-01-02-2304/" + WHEEL_NAME)
 
 
 @pytest.mark.parametrize("utc_hour,expected", [(4, "2026-11-02-1211"), (20, "2026-11-03-0411")])
@@ -119,7 +138,7 @@ def test_timestamp_uses_shanghai_time(make_wheel, run_publish, publisher, utc_ho
     code, transport = run_publish()
     assert code == 0
     publisher.datetime.now.assert_called_once_with(ZoneInfo("Asia/Shanghai"))
-    assert transport.call_args.args[0][-1].endswith(f"/{expected}/{WHEEL_NAME}")
+    assert transport.call_args_list[0].args[0][-1].endswith(f"/{expected}/{WHEEL_NAME}")
 
 
 def test_only_exact_whl_suffix_files_are_uploaded(make_wheel, run_publish, workspace):
@@ -129,8 +148,8 @@ def test_only_exact_whl_suffix_files_are_uploaded(make_wheel, run_publish, works
     (workspace / "artifact/directory.whl").mkdir()
     code, transport = run_publish()
     assert code == 0
-    transport.assert_called_once()
-    assert transport.call_args.args[0][-1] == BATCH_URL + ".hidden.whl"
+    assert transport.call_count == 2
+    assert transport.call_args_list[0].args[0][-1] == BATCH_URL + ".hidden.whl"
 
 
 @pytest.mark.parametrize("content", [b"", b"not a ZIP", b"PK\x03\x04broken ZIP"])
@@ -138,7 +157,7 @@ def test_empty_or_invalid_wheel_contents_are_uploaded_unchanged(content, make_wh
     path = make_wheel(filename="arbitrary-name.whl", content=content)
     code, transport = run_publish()
     assert code == 0
-    transport.assert_called_once()
+    assert transport.call_count == 2
     assert path.read_bytes() == content
 
 
@@ -151,7 +170,7 @@ def test_wheel_archive_is_neither_validated_nor_extracted(make_wheel, run_publis
     before = path.read_bytes()
     code, transport = run_publish()
     assert code == 0
-    transport.assert_called_once()
+    assert transport.call_count == 2
     assert path.read_bytes() == before
     assert not (workspace / "outside.txt").exists()
     assert not (path.parent / "wrong.dist-info").exists()
@@ -168,8 +187,9 @@ def test_arbitrary_filenames_are_encoded_without_shell_execution(filename, encod
     make_wheel(filename=filename)
     code, transport = run_publish()
     assert code == 0
-    assert transport.call_args.args[0][-1] == BATCH_URL + encoded
-    assert not transport.call_args.kwargs.get("shell", False)
+    assert transport.call_args_list[0].args[0][-1] == BATCH_URL + encoded
+    assert transport.call_args_list[1].args[0][-1].startswith(STORAGE_URL + encoded + "?properties=")
+    assert all(not call.kwargs.get("shell", False) for call in transport.call_args_list)
     assert not (workspace / "marker").exists()
 
 
@@ -178,8 +198,8 @@ def test_duplicate_basenames_are_all_uploaded_to_the_same_destination(make_wheel
     second = make_wheel(directory="artifact/two", content=b"second")
     code, transport = run_publish()
     assert code == 0
-    assert transport.call_count == 2
-    for call, path in zip(transport.call_args_list, [first, second]):
+    assert transport.call_count == 4
+    for call, path in zip(transport.call_args_list[::2], [first, second]):
         args = call.args[0]
         assert args[args.index("--upload-file") + 1] == str(path)
         assert args[-1] == BATCH_URL + WHEEL_NAME
@@ -240,11 +260,12 @@ def test_partial_failure_stops_batch_without_success_output(make_wheel, run_publ
         make_wheel(filename=filename)
     publisher.subprocess.run.side_effect = [
         subprocess.CompletedProcess([], 0, "201", ""),
+        subprocess.CompletedProcess([], 0, "204", ""),
         subprocess.CompletedProcess([], 22, "500", ""),
     ]
     code, transport = run_publish()
     assert code == 1
-    assert transport.call_count == 2
+    assert transport.call_count == 3
     assert not (workspace / "outputs").exists()
 
 
@@ -252,7 +273,7 @@ def test_success_without_github_output(make_wheel, run_publish, capsys):
     make_wheel()
     code, transport = run_publish(GITHUB_OUTPUT="")
     assert code == 0
-    transport.assert_called_once()
+    assert transport.call_count == 2
     assert BATCH_URL in capsys.readouterr().out
 
 
@@ -269,6 +290,7 @@ def test_missing_or_invalid_credentials_never_upload(key, value, make_wheel, run
 def test_http_or_network_failure_fails_without_outputs(status, returncode, make_wheel, run_publish,
                                                      publisher, workspace, capsys):
     make_wheel()
+    publisher.subprocess.run.side_effect = None
     publisher.subprocess.run.return_value = subprocess.CompletedProcess([], returncode, status, "test-token")
     code, transport = run_publish()
     assert code == 1
@@ -287,14 +309,144 @@ def test_timeout_does_not_log_credentials(make_wheel, run_publish, publisher, ca
     assert "test-token" not in captured.out + captured.err
 
 
+def test_properties_use_explicit_source_and_current_run(make_wheel, run_publish):
+    make_wheel()
+    code, transport = run_publish(
+        SOURCE_BRANCH="release/1.2", SOURCE_TAG="v1.2.3",
+        GITHUB_REPOSITORY="ci-owner/ci-repo", GITHUB_SHA="0" * 40,
+    )
+    assert code == 0
+    call = transport.call_args_list[1]
+    args = call.args[0]
+    assert args[:2] == ["curl", "--disable"]
+    assert args[args.index("--upload-file") + 1] == os.devnull
+    assert args[args.index("--user") + 1] == "test-user:test-token"
+    assert args[args.index("--proto") + 1] == "=https"
+    assert args[args.index("--retry") + 1] == "3"
+    assert "--location" not in args and "--insecure" not in args
+    assert not call.kwargs.get("shell", False)
+    assert args[-2] == "--"
+    assert args[-1] == (
+        STORAGE_URL + WHEEL_NAME + "?properties="
+        + f"repo={quote(SOURCE_REPO, safe='')};commit={SOURCE_COMMIT};"
+        + "branch=release%2F1.2;tag=v1.2.3;extra_info=;"
+        + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
+    )
+    assert "workflow=" not in args[-1]
+
+
+@pytest.mark.parametrize("extra_info", [
+    '{"runtime":"cuda","flags":["a","b"],"enabled":true,"value":null}',
+    '{\n  "text": "a=b;c,d|e&x=%+?#",\n  "path": "C:\\\\tmp"\n}',
+    '[1,{"nested":[false,null,"\\u2603"]}]',
+    '"a=b,c|d\\\\e"',
+    "null", "42", "", "  { }  ",
+])
+def test_extra_info_is_one_escaped_property_without_reformatting(extra_info, make_wheel, run_publish):
+    make_wheel()
+    code, transport = run_publish(EXTRA_INFO=extra_info)
+    assert code == 0
+    url = transport.call_args_list[1].args[0][-1]
+    query = url.split("?properties=", 1)[1].removesuffix("&recursive=0")
+    pairs = dict(pair.split("=", 1) for pair in query.split(";"))
+    assert set(pairs) == {"repo", "commit", "branch", "tag", "extra_info", "log_url", "run_id", "run_attempt"}
+    escaped = "".join("\\" + char if char in "\\,|=" else char for char in extra_info)
+    assert unquote(pairs["extra_info"]) == escaped
+    assert pairs["branch"] == pairs["tag"] == ""
+    assert "%0A" in pairs["extra_info"] if "\n" in extra_info else True
+
+
+@pytest.mark.parametrize("key,value", [
+    ("SOURCE_REPO", " \n\t"), ("SOURCE_REPO", "owner"),
+    ("SOURCE_REPO", "https://github.com/owner/repo"), ("SOURCE_REPO", "owner/.."),
+    ("SOURCE_REPO", "owner/repo/extra"),
+    ("SOURCE_COMMIT", "abcdef0"),
+    ("SOURCE_COMMIT", "a" * 39), ("SOURCE_COMMIT", "a" * 41), ("SOURCE_COMMIT", "z" * 40),
+    ("GITHUB_LOG_URL", ""), ("GITHUB_RUN_ID", ""), ("GITHUB_RUN_ID", "0"),
+    ("GITHUB_RUN_ID", "-1"), ("GITHUB_RUN_ID", "abc"),
+    ("GITHUB_RUN_ATTEMPT", ""), ("GITHUB_RUN_ATTEMPT", "0"), ("GITHUB_RUN_ATTEMPT", "1.5"),
+])
+def test_invalid_metadata_fails_before_any_request(key, value, make_wheel, run_publish, workspace):
+    make_wheel()
+    code, transport = run_publish(**{key: value})
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+
+
+@pytest.mark.parametrize("key,property_name", [("SOURCE_REPO", "repo"), ("SOURCE_COMMIT", "commit")])
+def test_missing_source_does_not_fall_back_to_trigger_context(key, property_name, make_wheel, run_publish, monkeypatch):
+    make_wheel()
+    monkeypatch.delenv(key)
+    code, transport = run_publish(GITHUB_REPOSITORY=SOURCE_REPO, GITHUB_SHA=SOURCE_COMMIT)
+    assert code == 0
+    query = transport.call_args_list[1].args[0][-1].split("?properties=", 1)[1]
+    assert f"{property_name}=;" in query
+
+
+def test_legacy_caller_without_new_inputs_still_uploads(make_wheel, run_publish, workspace):
+    make_wheel()
+    code, transport = run_publish(SOURCE_REPO="", SOURCE_COMMIT="", SOURCE_BRANCH="", SOURCE_TAG="", EXTRA_INFO="")
+    assert code == 0
+    assert transport.call_count == 2
+    assert transport.call_args_list[1].args[0][-1] == (
+        STORAGE_URL + WHEEL_NAME + "?properties=repo=;commit=;branch=;tag=;extra_info=;"
+        + f"log_url={quote(LOG_URL, safe='')};run_id=123456;run_attempt=2&recursive=0"
+    )
+    assert (workspace / "outputs").read_text() == f"upload_url={BATCH_URL}\n"
+
+
+@pytest.mark.parametrize("status,returncode", [
+    ("200", 0), ("201", 0), ("302", 0), ("401", 22), ("500", 22), ("000", 7), ("test-token", 0),
+])
+def test_property_failure_stops_batch_without_success_output(status, returncode, make_wheel, run_publish,
+                                                           publisher, workspace, capsys):
+    for name in ("a.whl", "b.whl"):
+        make_wheel(filename=name)
+    publisher.subprocess.run.side_effect = [
+        subprocess.CompletedProcess([], 0, "201", ""),
+        subprocess.CompletedProcess([], returncode, status, "test-token"),
+    ]
+    code, transport = run_publish()
+    assert code == 1
+    assert transport.call_count == 2
+    assert not (workspace / "outputs").exists()
+    captured = capsys.readouterr()
+    assert "expected HTTP 204" in captured.err
+    assert "test-token" not in captured.out + captured.err
+
+
+def test_property_timeout_does_not_log_credentials(make_wheel, run_publish, publisher, workspace, capsys):
+    make_wheel()
+    publisher.subprocess.run.side_effect = [
+        subprocess.CompletedProcess([], 0, "201", ""),
+        subprocess.TimeoutExpired(["curl", "test-token"], 540),
+    ]
+    code, transport = run_publish()
+    assert code == 1
+    assert transport.call_count == 2
+    assert not (workspace / "outputs").exists()
+    captured = capsys.readouterr()
+    assert "timed out" in captured.err
+    assert "test-token" not in captured.out + captured.err
+
+
 def test_workflow_wiring_and_secret_scope():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     call = workflow["on"]["workflow_call"]
     assert set(workflow["on"]) == {"workflow_call"}
-    assert set(call["inputs"]) == {"artifact_name", "template_repository", "template_ref"}
+    assert set(call["inputs"]) == {
+        "artifact_name", "template_repository", "template_ref", "repo", "commit", "branch", "tag", "extra_info",
+    }
     for name in ("artifact_name", "template_ref"):
         assert call["inputs"][name]["required"] == "true"
         assert call["inputs"][name]["type"] == "string"
+    for name in ("repo", "commit", "branch", "tag", "extra_info"):
+        assert call["inputs"][name] == {
+            "description": call["inputs"][name]["description"],
+            "required": "false", "type": "string", "default": "",
+        }
+    assert not {"log_url", "run_id", "run_attempt", "workflow"} & set(call["inputs"])
     job = workflow["jobs"]["push-wheel"]
     guard, checkout, setup, download, upload = job["steps"]
     assert workflow["permissions"] == {"contents": "read"}
@@ -309,7 +461,19 @@ def test_workflow_wiring_and_secret_scope():
     assert download["with"] == {"name": "${{ inputs.artifact_name }}",
                                 "path": "${{ runner.temp }}/push-tmp-wheel-artifact"}
     assert upload["env"]["ARTIFACT_DIR"] == download["with"]["path"]
-    assert set(upload["env"]) == {"ARTIFACT_DIR", "RELEASE_USERNAME", "RELEASE_TOKEN"}
+    source_env = {"repo": "SOURCE_REPO", "commit": "SOURCE_COMMIT", "branch": "SOURCE_BRANCH",
+                  "tag": "SOURCE_TAG", "extra_info": "EXTRA_INFO"}
+    assert set(upload["env"]) == {
+        "ARTIFACT_DIR", "RELEASE_USERNAME", "RELEASE_TOKEN", "GITHUB_LOG_URL", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
+        *source_env.values(),
+    }
+    for name, env_name in source_env.items():
+        assert upload["env"][env_name] == "${{ inputs." + name + " }}"
+    assert upload["env"]["GITHUB_LOG_URL"] == (
+        "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    )
+    assert upload["env"]["GITHUB_RUN_ID"] == "${{ github.run_id }}"
+    assert upload["env"]["GITHUB_RUN_ATTEMPT"] == "${{ github.run_attempt }}"
     assert upload["env"]["RELEASE_USERNAME"] == "${{ secrets.release_username }}"
     assert upload["env"]["RELEASE_TOKEN"] == "${{ secrets.release_token }}"
     assert upload["run"] == "python ci-template/ci-templates/push-tmp-wheel/scripts/push_tmp_wheel.py"
@@ -332,7 +496,9 @@ def test_demo_workflow_matches_template_contract():
     demo_path = ROOT / "workflows/demo-push-tmp-wheel.yml"
     demo = yaml.load(demo_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     assert set(demo["on"]) == {"workflow_dispatch"}
-    assert not demo["on"]["workflow_dispatch"]
+    dispatch_inputs = demo["on"]["workflow_dispatch"]["inputs"]
+    assert set(dispatch_inputs) == {"source_repository", "source_ref"}
+    assert all(value["required"] == "false" and value["default"] == "" for value in dispatch_inputs.values())
     assert demo["permissions"] == {"contents": "read"}
     build, publish, result = (demo["jobs"][name] for name in ("build", "publish", "result"))
     assert publish["needs"] == "build"
@@ -349,6 +515,21 @@ def test_demo_workflow_matches_template_contract():
         "release_username": "${{ secrets.RELEASE_USERNAME }}",
         "release_token": "${{ secrets.RELEASE_TOKEN }}",
     }
+    checkout = next(step for step in build["steps"] if step.get("uses") == "actions/checkout@v4")
+    source = next(step for step in build["steps"] if step.get("id") == "source")
+    assert checkout["with"]["repository"] == source["env"]["SOURCE_REPO"] == (
+        "${{ inputs.source_repository || github.repository }}"
+    )
+    assert checkout["with"]["ref"] == "${{ inputs.source_ref || github.ref }}"
+    assert checkout["with"]["fetch-depth"] == "0"
+    assert build["steps"].index(checkout) < build["steps"].index(source)
+    assert "git rev-parse HEAD" in source["run"]
+    assert "git symbolic-ref --quiet --short HEAD" in source["run"]
+    assert "git tag --points-at HEAD" in source["run"]
+    for name in ("repo", "commit", "branch", "tag"):
+        assert build["outputs"][name] == "${{ steps.source.outputs." + name + " }}"
+        assert publish["with"][name] == "${{ needs.build.outputs." + name + " }}"
+    assert publish["with"]["extra_info"] == '{"build_tool":"python-build"}'
     artifact = next(step for step in build["steps"] if step.get("uses") == "actions/upload-artifact@v4")
     assert artifact["with"]["name"] == build["outputs"]["artifact_name"]
     assert "${{ github.run_id }}" in artifact["with"]["name"]

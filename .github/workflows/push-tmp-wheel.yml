@@ -7,6 +7,31 @@ on:
         description: 'Artifact name saved by the caller using actions/upload-artifact@v4 in the current run; the calling job must declare needs on the producing job'
         required: true
         type: string
+      repo:
+        description: 'Actual source repository used to build the wheels, in owner/repo format; empty when not provided; never inferred from the triggering repository'
+        required: false
+        type: string
+        default: ''
+      commit:
+        description: 'Full 40-character commit SHA actually checked out for the wheel build; empty when not provided'
+        required: false
+        type: string
+        default: ''
+      branch:
+        description: 'Actual source branch; leave empty when unknown or not applicable'
+        required: false
+        type: string
+        default: ''
+      tag:
+        description: 'Tag pointing to the build commit; leave empty when none; multiple tags may be passed as one comma-separated string'
+        required: false
+        type: string
+        default: ''
+      extra_info:
+        description: 'Free-form extra information, including any JSON string; stored as one property without parsing or reformatting'
+        required: false
+        type: string
+        default: ''
       template_repository:
         description: 'Repository containing this workflow and the upload script, in owner/repo format'
         required: false
@@ -28,7 +53,7 @@ on:
         description: 'Publishing username from a caller repository or organization Actions Secret'
         required: true
       release_token:
-        description: 'Publishing token from a caller repository or organization Actions Secret'
+        description: 'Publishing token from a caller repository or organization Actions Secret; requires upload and item-property update permissions'
         required: true
 
 permissions:
@@ -74,11 +99,19 @@ jobs:
           name: ${{ inputs.artifact_name }}
           path: ${{ runner.temp }}/push-tmp-wheel-artifact
 
-      - name: Upload all wheels to timestamped temporary directory
+      - name: Upload all wheels and set properties
         id: upload
         shell: bash
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/push-tmp-wheel-artifact
+          SOURCE_REPO: ${{ inputs.repo }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
+          SOURCE_BRANCH: ${{ inputs.branch }}
+          SOURCE_TAG: ${{ inputs.tag }}
+          EXTRA_INFO: ${{ inputs.extra_info }}
+          GITHUB_LOG_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           RELEASE_USERNAME: ${{ secrets.release_username }}
           RELEASE_TOKEN: ${{ secrets.release_token }}
         run: python ci-template/ci-templates/push-tmp-wheel/scripts/push_tmp_wheel.py

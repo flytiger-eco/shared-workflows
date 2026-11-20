@@ -23,8 +23,8 @@ Caller builds wheels
   → actions/download-artifact@v4 downloads and extracts the named artifact
   → Recursively find all regular files ending in .whl
   → Generate one Asia/Shanghai (UTC+08:00) timestamp for the entire batch
-  → Upload every selected file unchanged to the timestamped directory
-  → Return the batch directory as upload_url after all uploads succeed
+  → Upload each selected file unchanged, then set its Artifactory properties
+  → Return the batch directory as upload_url after all uploads and property updates succeed
 ```
 
 The reusable workflow runs in a separate job and does not share local files with the caller's previous job. Build outputs must be transferred through artifacts. The template currently does not support artifacts from other workflow runs and does not search the caller repository for wheels. Artifact extraction is handled by `actions/download-artifact@v4`; nested ZIP or tar files inside the artifact are not unpacked.
@@ -32,10 +32,10 @@ The reusable workflow runs in a separate job and does not share local files with
 ## Quick Start
 
 1. Copy [`workflows/demo-push-tmp-wheel.yml`](workflows/demo-push-tmp-wheel.yml) to `.github/workflows/demo-push-tmp-wheel.yml` in the project to publish.
-2. Configure `RELEASE_USERNAME` and `RELEASE_TOKEN` in the caller repository or organization Actions Secrets. The publishing account needs upload permission for the destination temporary repository.
+2. Configure `RELEASE_USERNAME` and `RELEASE_TOKEN` in the caller repository or organization Actions Secrets. The publishing account needs upload and item-property update permissions for the destination temporary repository.
 3. Ensure the caller can use the template repository's workflows. Private template repositories must also allow cross-repository calls in Actions settings; configure `TEMPLATE_TOKEN` and uncomment the corresponding example line as needed.
-4. Adjust the example build environment and command for your project. The example uses Python 3.12 and `python -m build --wheel`, so the caller repository must be a buildable Python project. If CUDA, PPU SDK, or other system dependencies are required, configure the build runner/container and dependencies, and write build outputs to the directory specified in the example.
-5. After committing the example to the caller default branch, trigger it manually through **Run workflow** on the Actions page and select a trusted branch. No package name or wheel filename is required; the example passes the build job's artifact name and uploads all its `.whl` files.
+4. Adjust the example build environment and command for your project. The example uses Python 3.12 and `python -m build --wheel`, so the selected source repository must be a buildable Python project. If CUDA, PPU SDK, or other system dependencies are required, configure the build runner/container and dependencies, and write build outputs to the directory specified in the example.
+5. After committing the example to the caller default branch, trigger it manually through **Run workflow** on the Actions page. Select a trusted workflow branch and optionally enter `source_repository` (the actual build repository) and `source_ref` (its branch, tag, or SHA). Omitted values use the caller repository and selected workflow ref; set both explicitly when building another repository. The example records source metadata after checkout, passes it through build job outputs, and uploads all `.whl` files; no package name or wheel filename is required.
 6. After a successful run, find the batch directory URL in the `result` job logs or job summary. Individual file URLs are printed in the upload step logs.
 
 The example actually uploads to the temporary repository; it is not a dry run. Files under this directory's `workflows/` are provided for copying and are not automatically registered as Actions workflows in this repository.
@@ -58,10 +58,15 @@ All inputs have type `string`.
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `artifact_name` | Yes | None | Name of the artifact saved by the caller using `actions/upload-artifact@v4`; must not be empty and must belong to the current workflow run. |
+| `repo` | No | `''` | Actual source repository used for the build, in `owner/repo` format when provided. Empty when unknown. |
+| `commit` | No | `''` | Full 40-character hexadecimal SHA from `git rev-parse HEAD` in the actual build source directory when provided. Empty when unknown. |
+| `branch` | No | `''` | Actual source branch; empty when unknown or not applicable, such as detached HEAD. |
+| `tag` | No | `''` | Tag pointing to the build commit; empty when none. Multiple tags may be passed as one comma-separated string. |
+| `extra_info` | No | `''` | Arbitrary extra information, including any JSON string; stored as a single property without parsing or reformatting. |
 | `template_repository` | No | `flytiger-eco/shared-workflows` | Repository containing the template script, in `owner/repo` format. |
 | `template_ref` | Yes | None | Template script version; must match the workflow version referenced by `uses`. |
 
-Existing callers must remove `package_name` and `wheel_name` from `with`; these inputs are no longer accepted. The template repository/ref and Secret settings remain unchanged.
+All five new inputs (`repo`, `commit`, `branch`, `tag`, and `extra_info`) are optional and default to empty strings, so existing callers do not need to add them. Missing source fields are written as empty properties and never fall back to GitHub context. When provided, `repo` and `commit` are validated before uploading. Do not substitute the triggering workflow's repository or SHA when the actual build source is different. Source metadata must describe the same build as the uploaded artifact, including when rerunning only the publishing job. The previously removed `package_name` and `wheel_name` inputs remain unsupported.
 
 For example, an artifact containing:
 
@@ -87,7 +92,7 @@ The calling job must use `needs` to wait for the job that saves the artifact. Th
 | Template Secret | Required | Caller Secret in the Example | Description |
 | --- | --- | --- | --- |
 | `release_username` | Yes | `RELEASE_USERNAME` | Artifactory publishing username. |
-| `release_token` | Yes | `RELEASE_TOKEN` | Artifactory publishing credential with upload permission for the destination path. |
+| `release_token` | Yes | `RELEASE_TOKEN` | Artifactory publishing credential with upload and item-property update permissions for the destination path. |
 | `template_token` | No | `TEMPLATE_TOKEN` | Read-only token for checking out a private template repository; defaults to `github.token`, which may lack read access across repositories. |
 
 The example explicitly maps credentials through `jobs.publish.secrets` and passes publishing credentials only to the publishing job. Credential values are not written into YAML, build arguments, or output logs.
@@ -96,11 +101,47 @@ The example explicitly maps credentials through `jobs.publish.secrets` and passe
 
 | Output | Description |
 | --- | --- |
-| `upload_url` | Batch directory URL with a trailing slash, emitted only after all files upload successfully, available through `${{ needs.publish.outputs.upload_url }}`; `publish` is the ID of the job calling the template. |
+| `upload_url` | Batch directory URL with a trailing slash, emitted only after all files upload and all property updates succeed, available through `${{ needs.publish.outputs.upload_url }}`; `publish` is the ID of the job calling the template. |
 
 For example, `upload_url` is `https://pkg.flytiger-eco.com/artifactory/pypi_tmp/2026-11-02-1211/`. It is now a directory URL, not a single wheel URL. Individual file URLs are logged after each successful upload.
 
 Filenames are percent-encoded in URLs; for example, `+` becomes `%2B`. No package or version directory is added, and uploaded file contents remain unchanged.
+
+## Artifactory Properties
+
+Every uploaded wheel receives the same eight properties. `repo`, `commit`, `branch`, `tag`, and `extra_info` come only from caller inputs. Optional fields are sent with empty values when omitted. The following three properties come directly from GitHub context and are not inputs:
+
+| Property | Source | Description |
+| --- | --- | --- |
+| `log_url` | `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}` | Current caller workflow run page, not the source or template repository. |
+| `run_id` | `${{ github.run_id }}` | ID of the current publishing run. |
+| `run_attempt` | `${{ github.run_attempt }}` | Current attempt, including when rerunning only the publishing job. |
+
+`run_id` and `run_attempt` must be positive integers. These three fields cannot be overridden by caller inputs; the source metadata still describes the original build.
+
+For each wheel, an empty-body PUT sets the properties using:
+
+```text
+https://pkg.flytiger-eco.com/artifactory/api/storage/pypi_tmp/{timestamp}/{filename}?properties=repo=...;commit=...;branch=...;tag=...;extra_info=...;log_url=...;run_id=...;run_attempt=...&recursive=0
+```
+
+The property request must return `204 No Content`. Values are escaped for Artifactory (backslashes, commas, pipes, and equals signs) and percent-encoded so JSON and ref names remain single property values. JSON is neither validated, expanded into separate properties, nor reformatted.
+
+Example caller inputs, with source outputs recorded after checkout in the build job:
+
+```yaml
+with:
+  artifact_name: ${{ needs.build.outputs.artifact_name }}
+  repo: ${{ needs.build.outputs.repo }}
+  commit: ${{ needs.build.outputs.commit }}
+  branch: ${{ needs.build.outputs.branch }}
+  tag: ${{ needs.build.outputs.tag }}
+  extra_info: '{"runtime":"cuda","version":"13.0","flags":["a","b"]}'
+  template_repository: flytiger-eco/shared-workflows
+  template_ref: main
+```
+
+The complete demo checks out the requested `source_repository` and `source_ref`, records the actual HEAD SHA, reads the symbolic branch when attached, and joins all tags pointing at HEAD into one comma-separated string. When adapting it to a checkout with `path`, run the metadata commands and build in that source directory. Detached HEAD does not identify a unique source branch; pass the known build branch explicitly or leave it empty. Cross-repository private sources need a suitable read-only credential on the source checkout; the default `github.token` usually cannot read them.
 
 ## File Selection
 
@@ -111,8 +152,8 @@ Other suffixes, directories, and symlinks are skipped. Directory symlinks are no
 ## Upload and Failure Behavior
 
 - Uploads use HTTPS PUT with the username and token sent through Basic Auth. Redirects are not followed to avoid sending files and publishing credentials to other destinations.
-- Network or HTTP errors fail the job; only HTTP 2xx responses are accepted. curl is configured for 3 retries, but not every error is retried.
-- Files are uploaded sequentially in sorted local-path order. On the first upload failure, the job stops and emits no successful `upload_url`; files already uploaded are not rolled back. Empty or malformed publishing credentials also fail the job.
+- Network or HTTP errors fail the job. File uploads require HTTP 2xx; property updates require HTTP 204 specifically. curl is configured for 3 retries, but not every error is retried.
+- Files are uploaded sequentially in sorted local-path order, with properties set immediately after each upload. On the first upload or property-update failure, the job stops and emits no successful `upload_url`; files already uploaded are not rolled back. Empty or malformed publishing credentials also fail the job. Existing publishing credentials must allow item-property updates as well as uploads.
 - The template does not check for duplicate filenames or existing server files. Files with the same basename in different artifact subdirectories target the same URL and are all uploaded; later uploads may overwrite earlier ones depending on Artifactory permissions. Use distinct filenames to preserve every file.
 - Separate batches whose timestamps are captured in the same Asia/Shanghai (UTC+08:00) minute share the same destination directory. Reruns capture the current timestamp again but may still use the same directory. Minute-level timestamps do not guarantee unique directories or overwrite prevention.
 
