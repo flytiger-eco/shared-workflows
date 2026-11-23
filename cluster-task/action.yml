@@ -80,6 +80,23 @@ inputs:
       to target nodes with matching labels. Combined with the base ack.node.ppu.schedule label as a hard AND constraint.
     required: false
     default: ''
+  rack_policy:
+    description: >-
+      ICN rack placement policy. Empty (default) adds no rack constraint; same keeps all workers in one
+      automatically selected rack; spread balances workers across at least two matching racks (per-rack
+      counts differ by at most one). No rack names are required. Requires board-type=ZW-M890P in node_selector;
+      spread also requires nnodes of 2 or more. Incompatible capacity waits within the job timeout without
+      relaxing the policy; same-rack placement does not backtrack the whole gang to another rack.
+    required: false
+    default: ''
+  rack_count:
+    description: >-
+      Exact number of automatically selected ICN racks, only with rack_policy=spread. Must be an integer
+      between 2 and nnodes. Empty spreads across all eligible racks. Candidates honor node selectors, readiness,
+      cordon, blocking taints and registered PPU capacity; the candidate snapshot is not a resource reservation.
+      Insufficient rack candidates wait within the job timeout.
+    required: false
+    default: ''
   container_options:
     description: >-
       Container runtime options (YAML snippet, multiple lines allowed). Supported keys: privileged: true/false
@@ -142,6 +159,9 @@ outputs:
   task_pods:
     description: 'Comma-separated worker pod names.'
     value: ${{ steps.monitor.outputs.task_pods || steps.submit.outputs.task_pods }}
+  task_racks:
+    description: 'JSON array of icn-rack values per worker in rank order; empty unless rack_policy is set.'
+    value: ${{ steps.submit.outputs.task_racks }}
 
 runs:
   using: 'composite'
@@ -333,6 +353,8 @@ runs:
         INPUT_MASTER_PORT: ${{ inputs.master_port }}
         INPUT_CLEANUP_POLICY: ${{ inputs.cleanup_policy }}
         INPUT_NODE_SELECTOR: ${{ inputs.node_selector }}
+        INPUT_RACK_POLICY: ${{ inputs.rack_policy }}
+        INPUT_RACK_COUNT: ${{ inputs.rack_count }}
         INPUT_SOURCE_DIR: ${{ inputs.source_dir }}
         CONTAINER_OPTIONS: ${{ inputs.container_options }}
         SOURCE_STAGE_DIR: ${{ env.SOURCE_STAGE_DIR }}

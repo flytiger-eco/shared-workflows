@@ -27,8 +27,10 @@ set_output "pod_queue" ""
 set_output "queue_reason" ""
 set_output "occupied_ppu_card_hours" "0.0000"
 set_output "execution_ppu_card_hours" "0.0000"
+set_output "task_racks" ""
 
 FINAL_STATUS="failed"
+WORKERS_SUBMITTED=false
 MASTER_KEYS_DIR=""
 _on_exit() {
   local rc=$?
@@ -45,7 +47,7 @@ _on_exit() {
     wait "$WAIT_PID" 2>/dev/null || true
   fi
   if [ "$FINAL_STATUS" != "scheduled" ] && [ -n "${START_TIME:-}" ]; then
-    JOB_STATUS="$FINAL_STATUS" JOB_START_TIME="$START_TIME" \
+    JOB_STATUS="$FINAL_STATUS" JOB_START_TIME="$START_TIME" WORKERS_SUBMITTED="$WORKERS_SUBMITTED" \
       bash "$(dirname "${BASH_SOURCE[0]}")/report-job.sh" || true
   fi
   exit "$rc"
@@ -106,6 +108,23 @@ EXTRA_ENV="${INPUT_EXTRA_ENV:-}"
 MASTER_PORT="${INPUT_MASTER_PORT:-29500}"
 CLEANUP_POLICY="${INPUT_CLEANUP_POLICY:-always}"
 NODE_SELECTOR="${INPUT_NODE_SELECTOR:-}"
+RACK_POLICY="${INPUT_RACK_POLICY:-}"
+case "$RACK_POLICY" in
+  ""|same|spread) ;;
+  *) log_error "rack_policy must be empty, same or spread"; exit 1 ;;
+esac
+RACK_COUNT="${INPUT_RACK_COUNT:-}"
+if [ -n "$RACK_COUNT" ]; then
+  if [ "$RACK_POLICY" != spread ]; then
+    log_error "rack_count requires rack_policy=spread"
+    exit 1
+  fi
+  if ! jq -en --arg count "$RACK_COUNT" --arg nnodes "$NNODES" '
+    $count | test("\\A[1-9][0-9]*\\z") and (tonumber >= 2 and tonumber <= ($nnodes | tonumber))' >/dev/null; then
+    log_error "rack_count must be an integer between 2 and nnodes"
+    exit 1
+  fi
+fi
 SOURCE_STAGE_DIR="${SOURCE_STAGE_DIR:-}"
 SOURCE_MOUNT_PATH="${INPUT_SOURCE_DIR:-/workspace/source}"
 CONTAINER_OPTIONS="${CONTAINER_OPTIONS:-}"
@@ -254,6 +273,7 @@ if [[ -n "${USER_ENV_JSON:-}" && "${USER_ENV_JSON}" != "{}" && "${USER_ENV_JSON}
 fi
 
 NODE_SELECTOR_YAML=""
+NODE_QUERY_SELECTOR=""
 BOARD_TYPE=""
 if [ -n "$NODE_SELECTOR" ]; then
   _ns_items=""
@@ -293,12 +313,29 @@ if [ -n "$NODE_SELECTOR" ]; then
       BOARD_TYPE="$_val"
       [ "$_val" = "ZW-810E" ] && _val="OAM-810E"
     fi
+    if [ "$_key" = "icn-rack" ] && [ -n "$RACK_POLICY" ]; then
+      log_error "node_selector cannot set icn-rack when rack_policy is used"
+      exit 1
+    fi
+    NODE_QUERY_SELECTOR+="${NODE_QUERY_SELECTOR:+,}${_key}=${_val}"
     _ns_items+="    ${_key}: \"${_val}\""$'\n'
   done
   _ns_items="${_ns_items%$'\n'}"
   if [ -n "$_ns_items" ]; then
     NODE_SELECTOR_YAML="  nodeSelector:"$'\n'"${_ns_items}"
   fi
+fi
+
+if [ -n "$RACK_POLICY" ]; then
+  if [ "$BOARD_TYPE" != "ZW-M890P" ]; then
+    log_error "rack_policy requires board-type=ZW-M890P in node_selector; 810E nodes have no ICN rack"
+    exit 1
+  fi
+  if [ "$RACK_POLICY" = spread ] && [ "$NNODES" -lt 2 ]; then
+    log_error "rack_policy=spread requires nnodes of 2 or more"
+    exit 1
+  fi
+  log_info "Rack policy: ${RACK_POLICY} (rack names selected by the scheduler)"
 fi
 
 # --- Parse container runtime options ---
@@ -624,6 +661,75 @@ fi
 
 SCRIPT_INDENTED=$(printf '%s\n' "$COMMAND" | sed 's/^/          /')
 
+write_task_record() {
+  {
+    TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"
+    mkdir -p "$TASK_DIR" 2>/dev/null || true
+    TASK_FILE="${TASK_DIR}/${JOB_NAME}.json"
+    cat > "$TASK_FILE" <<TASK_EOF
+{
+  "run_id": "${RUN_ID}",
+  "run_attempt": "${RUN_ATTEMPT}",
+  "repo": "${GITHUB_REPOSITORY}",
+  "job_name": "${JOB_NAME}",
+  "github_job": "${GITHUB_JOB_NAME}",
+  "pod_name": "${JOB_NAME}-worker-0",
+  "namespace": "${NAMESPACE}",
+  "ppu_per_node": ${NPROC},
+  "nnodes": ${NNODES},
+  "ppu_total": $(( NNODES * NPROC )),
+  "start_time": "$(date +%Y-%m-%dT%H:%M:%S%z)",
+  "status": "pending"
+}
+TASK_EOF
+    log_info "Task record written: ${TASK_FILE}"
+  } 2>/dev/null || true
+}
+
+SELECTED_RACKS="[]"
+if [ -n "$RACK_COUNT" ]; then
+  write_task_record
+  while true; do
+    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+      log_error "Timed out waiting for ${RACK_COUNT} racks with enough matching nodes"
+      FINAL_STATUS="timeout"
+      exit 0
+    fi
+    SELECTED_RACKS=$(kube_request get nodes --selector="${NODE_QUERY_SELECTOR},icn-rack" -o json | jq -c \
+      --argjson count "$RACK_COUNT" --argjson nnodes "$NNODES" --argjson nproc "$NPROC" '
+      [.items[] |
+        select(.spec.unschedulable != true) |
+        select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) |
+        select(all(.spec.taints[]?;
+          (.effect != "NoSchedule" and .effect != "NoExecute") or
+          (.key == "node.kubernetes.io/not-ready" or .key == "node.kubernetes.io/unreachable" or
+           .key == "node.kubernetes.io/memory-pressure" or .key == "node.kubernetes.io/disk-pressure" or
+           .key == "node.kubernetes.io/pid-pressure" or .key == "node.kubernetes.io/unschedulable" or
+           .key == "node.kubernetes.io/network-unavailable"))) |
+        select((.metadata.labels["icn-rack"] // "") != "") |
+        select((.status.allocatable["alibabacloud.com/ppu"] // "0" | tonumber) >= $nproc)] |
+      group_by(.metadata.labels["icn-rack"]) |
+      map({rack: .[0].metadata.labels["icn-rack"], nodes: length}) |
+      sort_by(-.nodes, .rack) | .[:$count] |
+      if length == $count and all(.[]; .nodes >= ($nnodes / $count | floor)) and
+         ([.[] | select(.nodes >= ($nnodes / $count | ceil))] | length) >= ($nnodes % $count)
+      then map(.rack) else [] end')
+    if [ "$(printf '%s' "$SELECTED_RACKS" | jq length)" -eq "$RACK_COUNT" ]; then
+      log_info "Selected ${RACK_COUNT} racks: ${SELECTED_RACKS} (candidate capacity, not a reservation)"
+      break
+    fi
+    log_info "Waiting for ${RACK_COUNT} racks with enough matching nodes"
+    WAIT_SECONDS=$(( DEADLINE - $(date +%s) ))
+    [ "$WAIT_SECONDS" -gt "$POLL_INTERVAL" ] && WAIT_SECONDS=$POLL_INTERVAL
+    if [ "$WAIT_SECONDS" -gt 0 ]; then
+      sleep "$WAIT_SECONDS" &
+      WAIT_PID=$!
+      wait "$WAIT_PID"
+      WAIT_PID=""
+    fi
+  done
+fi
+
 # --- Remove old resources with the same name ---
 log_info "Removing old resources with the same name, if any: $JOB_NAME"
 kube_request delete pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" --ignore-not-found=true --wait=false
@@ -739,6 +845,45 @@ AFFINITY_EOF
 )
 fi
 
+RACK_TOPOLOGY_YAML=""
+RACK_NODE_MATCH_YAML="                operator: Exists"
+if [ -n "$RACK_COUNT" ]; then
+  RACK_NODE_MATCH_YAML="                operator: In
+                values: ${SELECTED_RACKS}"
+fi
+if [ -n "$RACK_POLICY" ]; then
+  if [ -z "$POD_AFFINITY_YAML" ]; then
+    POD_AFFINITY_YAML="  affinity:"
+  fi
+  POD_AFFINITY_YAML+="
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: icn-rack
+${RACK_NODE_MATCH_YAML}"
+  if [ "$RACK_POLICY" = same ] && [ "$NNODES" -gt 1 ]; then
+    POD_AFFINITY_YAML+="
+    podAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              ppu-job: \"${JOB_NAME}\"
+          topologyKey: icn-rack"
+  elif [ "$RACK_POLICY" = spread ]; then
+    RACK_TOPOLOGY_YAML="  topologySpreadConstraints:
+    - maxSkew: 1
+      minDomains: ${RACK_COUNT:-2}
+      topologyKey: icn-rack
+      whenUnsatisfiable: DoNotSchedule
+      nodeAffinityPolicy: Honor
+      nodeTaintsPolicy: Honor
+      labelSelector:
+        matchLabels:
+          ppu-job: \"${JOB_NAME}\""
+  fi
+fi
+
 # Generate NAS volumeMounts and volumes in the pod spec from DEFAULT_NAS_VOLUMES
 DEFAULT_NAS_VOLUME_MOUNTS=""
 DEFAULT_NAS_VOLUME_DEFS=""
@@ -788,6 +933,7 @@ spec:
   restartPolicy: Never
 ${MASTER_POD_OPTIONS}
 ${POD_AFFINITY_YAML}
+${RACK_TOPOLOGY_YAML}
 ${NODE_SELECTOR_YAML}
 ${POD_LEVEL_OPTIONS_YAML}
   dnsConfig:
@@ -879,31 +1025,13 @@ POD_EOF
   kube_request create -f "$POD_MANIFEST"
 done
 
+WORKERS_SUBMITTED=true
 log_info "All ${NNODES} worker pods submitted"
 
 # --- Write task record to NAS ---
-{
-  TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"
-  mkdir -p "$TASK_DIR" 2>/dev/null || true
-  TASK_FILE="${TASK_DIR}/${JOB_NAME}.json"
-  cat > "$TASK_FILE" <<TASK_EOF
-{
-  "run_id": "${RUN_ID}",
-  "run_attempt": "${RUN_ATTEMPT}",
-  "repo": "${GITHUB_REPOSITORY}",
-  "job_name": "${JOB_NAME}",
-  "github_job": "${GITHUB_JOB_NAME}",
-  "pod_name": "${JOB_NAME}-worker-0",
-  "namespace": "${NAMESPACE}",
-  "ppu_per_node": ${NPROC},
-  "nnodes": ${NNODES},
-  "ppu_total": $(( NNODES * NPROC )),
-  "start_time": "$(date +%Y-%m-%dT%H:%M:%S%z)",
-  "status": "pending"
-}
-TASK_EOF
-  log_info "Task record written: ${TASK_FILE}"
-} 2>/dev/null || true
+if [ -z "${TASK_FILE:-}" ]; then
+  write_task_record
+fi
 
 log_info "Waiting for PPU scheduling (shared job timeout: ${TIMEOUT}s)..."
 
@@ -927,7 +1055,24 @@ while true; do
   fi
   SCHEDULED=$(printf '%s' "$POD_SNAPSHOT" | jq '[.items[] | select(any(.status.conditions[]?; .type == "PodScheduled" and .status == "True"))] | length')
   if [ "$SCHEDULED" -eq "$NNODES" ]; then
-    printf '%s' "$POD_SNAPSHOT" | jq -r '.items[] | "Pod \(.metadata.name) -> Node: \(.spec.nodeName)"'
+    if [ -n "$RACK_POLICY" ]; then
+      RACK_MAP_FILE="$MANIFEST_DIR/node-racks.json"
+      if kube_request get nodes -o json | jq -c '
+        .items | map({key: .metadata.name, value: .metadata.labels["icn-rack"]}) | from_entries' > "$RACK_MAP_FILE"; then
+        printf '%s' "$POD_SNAPSHOT" | jq -r --slurpfile racks "$RACK_MAP_FILE" '
+          ($racks[0] // {}) as $map |
+          .items[] | "Pod \(.metadata.name) -> Node: \(.spec.nodeName) (icn-rack=\($map[.spec.nodeName] // "unknown"))"'
+        TASK_RACKS=$(printf '%s' "$POD_SNAPSHOT" | jq -c --slurpfile racks "$RACK_MAP_FILE" '
+          ($racks[0] // {}) as $map |
+          [.items | sort_by(.metadata.labels["worker-index"] | tonumber)[] | $map[.spec.nodeName] // ""]')
+        set_output "task_racks" "$TASK_RACKS"
+      else
+        log_warn "Could not read node rack labels; printing node placement only"
+        printf '%s' "$POD_SNAPSHOT" | jq -r '.items[] | "Pod \(.metadata.name) -> Node: \(.spec.nodeName)"'
+      fi
+    else
+      printf '%s' "$POD_SNAPSHOT" | jq -r '.items[] | "Pod \(.metadata.name) -> Node: \(.spec.nodeName)"'
+    fi
     FINAL_STATUS="scheduled"
     set_output "job_status" "$FINAL_STATUS"
     log_info "All ${NNODES} worker pods are scheduled"

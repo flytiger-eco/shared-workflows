@@ -122,6 +122,8 @@ with a warning.
 | `cleanup_policy` | no | `always` | Compatibility input, ignored; all resources are always cleaned up |
 | `source_dir` | no | `/workspace/source` | Path where staged source is extracted in the pod |
 | `node_selector` | no | | `KEY1=VAL1,...`, merged into `spec.nodeSelector` |
+| `rack_policy` | no | | `same` for one automatically selected ICN rack, `spread` for balanced multi-rack placement; empty imposes no rack constraint |
+| `rack_count` | no | | Exact rack count with `spread`, between 2 and `nnodes`; empty uses all eligible racks |
 | `container_options` | no | | YAML snippet, see below |
 | `artifact_paths` | no | | Extra paths (one per line) staged with the source |
 | `job_suffix` | no | | Readable segment of resource names; a unique hash is always appended |
@@ -131,6 +133,44 @@ with a warning.
 timeout or cancellation. Currently `on_failure` and `always` have identical dmesg
 behavior for every outcome, including successful jobs; neither limits NAS retention
 to failed runs.
+
+### `rack_policy` and `rack_count`
+
+Choose ICN rack placement without naming racks:
+
+| Policy | Placement |
+| --- | --- |
+| Empty (default) | No rack constraint; existing node selectors still apply |
+| `same` | All workers share one automatically selected rack |
+| `spread` | Workers span at least two matching racks, per-rack counts differ by at most one |
+
+```yaml
+nnodes: 8
+nproc_per_node: 1
+node_selector: "board-type=ZW-M890P,nic-type=cx8"
+rack_policy: spread
+rack_count: 4   # four racks, two workers each; use 2 for four workers each
+```
+
+An active policy requires `board-type=ZW-M890P` in `node_selector` and nodes carrying
+an `icn-rack` label; `spread` requires `nnodes >= 2`. A simultaneous explicit
+`icn-rack` node selector is rejected; 810E boards have no rack labels and reject
+either policy. `rack_count` is only valid with `spread` and must be an integer
+between 2 and `nnodes`; counts that do not divide evenly differ by at most one
+(e.g. five workers across two racks use 3+2).
+
+`same` anchors placement on the first assumed worker and does not backtrack the
+whole gang to another rack when the chosen rack lacks capacity. `spread` uses
+`maxSkew=1`, `minDomains=2` (or `rack_count`), `DoNotSchedule`, honoring node
+affinity and taints. With `rack_count`, the action selects that many candidate
+racks by node selectors, readiness, cordon, blocking taints and registered PPU
+capacity; the candidate snapshot is not a reservation. Incompatible placement
+waits within `timeout_minutes` and is never silently relaxed. Gang scheduling is
+not transactional resource reservation.
+
+The `task_racks` output reports a JSON array of `icn-rack` values per worker in
+rank order (empty unless `rack_policy` is set), captured before cleanup; scheduling
+logs also print each pod's node and rack.
 
 ### `container_options`
 
@@ -190,6 +230,7 @@ Variables declared in the workflow or job `env` context are forwarded automatica
 | `occupied_ppu_card_hours` | PPU card-hours from pod scheduling until completion, including image pulling and startup |
 | `execution_ppu_card_hours` | PPU card-hours while worker containers are running |
 | `task_pods` | Comma-separated worker pod names |
+| `task_racks` | JSON array of `icn-rack` values per worker in rank order; empty unless `rack_policy` is set |
 
 The queue duration is measured from the first pod creation until every pod is scheduled. For a pod
 that never schedules, it is measured until the job ends. Both card-hours metrics sum each

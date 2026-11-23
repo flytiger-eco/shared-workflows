@@ -189,6 +189,22 @@ jobs:
             nnodes: 2
             cards: 8
             board: ZW-M890P
+          - scenario: 890P two nodes same rack
+            nnodes: 2
+            cards: 1
+            board: ZW-M890P
+            rack_policy: same
+          - scenario: 890P three nodes spread racks
+            nnodes: 3
+            cards: 1
+            board: ZW-M890P
+            rack_policy: spread
+          - scenario: 890P two nodes across two racks
+            nnodes: 2
+            cards: 1
+            board: ZW-M890P
+            rack_policy: spread
+            rack_count: 2
           - scenario: 810E single card
             nnodes: 0
             cards: 1
@@ -219,6 +235,8 @@ jobs:
           nnodes: ${{ matrix.nnodes }}
           nproc_per_node: ${{ matrix.cards }}
           node_selector: board-type=${{ matrix.board }}
+          rack_policy: ${{ matrix.rack_policy }}
+          rack_count: ${{ matrix.rack_count }}
           dmesg_policy: always
           timeout_minutes: 10
           command: ${{ env.COMMAND }}
@@ -674,6 +692,46 @@ jobs:
           echo "outcome=${GANG_OUTCOME} job_status=${GANG_STATUS}"
           test "$GANG_OUTCOME" = failure
           test "$GANG_STATUS" = timeout
+
+  ppu-rack-count-block:
+    name: Block unavailable rack-count candidates
+    needs: validate
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    steps:
+      - name: Check out action
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Request racks that cannot exist
+        id: racks
+        continue-on-error: true
+        uses: $/cluster-task
+        with:
+          image: ${{ env.IMAGE }}
+          namespace: ${{ env.NAMESPACE }}
+          nnodes: 2
+          nproc_per_node: 1
+          node_selector: board-type=ZW-M890P,nic-type=cx8,ppu-ci-unavailable-rack=${{ github.run_id }}-${{ github.run_attempt }}
+          rack_policy: spread
+          rack_count: 2
+          timeout_minutes: 2
+          command: echo 'Unavailable rack candidates must not start' && exit 1
+
+      - name: Confirm rack candidates timed out without workers
+        shell: bash
+        env:
+          RACKS_OUTCOME: ${{ steps.racks.outcome }}
+          RACKS_STATUS: ${{ steps.racks.outputs.job_status }}
+          RACKS_PODS: ${{ steps.racks.outputs.task_pods }}
+        run: |
+          echo "outcome=${RACKS_OUTCOME} job_status=${RACKS_STATUS} task_pods=${RACKS_PODS}"
+          test "$RACKS_OUTCOME" = failure
+          test "$RACKS_STATUS" = timeout
+          test -z "$RACKS_PODS"
 
   prepare-artifact:
     name: Prepare staging fixture
