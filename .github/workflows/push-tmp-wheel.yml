@@ -8,25 +8,21 @@ on:
         required: true
         type: string
       repo:
-        description: 'Actual source repository used to build the wheels, in owner/repo format; empty when not provided; never inferred from the triggering repository'
-        required: false
+        description: 'Actual source repository used to build the wheels, in owner/repo format when non-empty; must be passed explicitly; empty skips the property; never inferred from the triggering repository'
+        required: true
         type: string
-        default: ''
       commit:
-        description: 'Full 40-character commit SHA actually checked out for the wheel build; empty when not provided'
-        required: false
+        description: 'Full 40-character commit SHA actually checked out for the wheel build when non-empty; must be passed explicitly; empty skips the property'
+        required: true
         type: string
-        default: ''
       branch:
-        description: 'Actual source branch; leave empty when unknown or not applicable'
-        required: false
+        description: 'Actual source branch; must be passed explicitly; empty skips the property when unknown or not applicable'
+        required: true
         type: string
-        default: ''
       tag:
-        description: 'Tag pointing to the build commit; leave empty when none; multiple tags may be passed as one comma-separated string'
-        required: false
+        description: 'Tag pointing to the build commit; must be passed explicitly; empty skips the property when none; multiple tags may be passed as one comma-separated string'
+        required: true
         type: string
-        default: ''
       extra_info:
         description: 'Reserved for compatibility; accepted but currently ignored and not written as an Artifactory property'
         required: false

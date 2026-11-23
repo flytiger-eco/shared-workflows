@@ -24,15 +24,18 @@ PROPERTY_ENV = {
 
 
 def build_property_query(env):
+    for key in ("repo", "commit", "branch", "tag"):
+        if PROPERTY_ENV[key] not in env:
+            raise ValueError(f"{key} must be provided")
     properties = {key: env.get(name, "") for key, name in PROPERTY_ENV.items()}
     repo = properties["repo"]
     if repo and (
         not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+", repo)
         or repo.split("/")[-1] in (".", "..")
     ):
-        raise ValueError("repo must be in owner/repo format when provided")
+        raise ValueError("repo must be in owner/repo format when non-empty")
     if properties["commit"] and not re.fullmatch(r"[0-9a-fA-F]{40}", properties["commit"]):
-        raise ValueError("commit must be a full 40-character hexadecimal SHA when provided")
+        raise ValueError("commit must be a full 40-character hexadecimal SHA when non-empty")
     if not properties["log_url"].strip():
         # Older workflow wrappers do not inject GITHUB_LOG_URL; use the runner's native context.
         server_url = env.get("GITHUB_SERVER_URL", "").strip().rstrip("/")
@@ -49,6 +52,8 @@ def build_property_query(env):
             raise ValueError(f"{PROPERTY_ENV[key]} must be a positive integer")
     pairs = []
     for key, value in properties.items():
+        if value == "":
+            continue
         escaped_value = re.sub(r"([\\,|=])", r"\\\1", value)
         pairs.append(f"{key}={quote(escaped_value, safe='')}")
     return "properties=" + ";".join(pairs)
