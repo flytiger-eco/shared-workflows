@@ -734,19 +734,40 @@ def test_invalid_source_properties_stop_before_any_request(
     assert "source_properties" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("commit", ["", "custom-commit"])
-def test_source_commit_override_does_not_change_automatic_version(commit, make_file, run_upload):
+@pytest.mark.parametrize("commit,short_commit", [
+    (None, "abcdef1"), ("", "abcdef1"), ("7654321" + "a" * 33, "7654321"),
+    ("ABCDEF9876543210", "ABCDEF9"), ("custom7-commit", "custom7"), ("abc", "abc"),
+])
+@pytest.mark.parametrize("version", ["", "explicit-version"])
+def test_source_commit_override_controls_automatic_version(
+    commit, short_commit, version, make_file, run_upload, workspace,
+):
     make_file()
+    overrides = {} if commit is None else {"commit": commit}
     code, transport = run_upload(inputs=dict(
-        DEFAULT_INPUTS, version="", source_properties=json.dumps({"commit": commit}),
+        DEFAULT_INPUTS, version=version, source_properties=json.dumps(overrides),
     ))
     assert code == 0
     upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
     storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
-    assert unquote(upload_url) == f"{BASE_URL}/{CALLER_REPOSITORY}/1.2.3+abcdef1.ppu2.2.0/{DEMO_FILENAME}"
+    expected_version = version or f"1.2.3+{short_commit}.ppu2.2.0"
+    assert unquote(upload_url) == f"{BASE_URL}/{CALLER_REPOSITORY}/{expected_version}/{DEMO_FILENAME}"
     assert _query_pairs(storage_url) == dict(
-        expected_property_values(), version="1.2.3+abcdef1.ppu2.2.0", commit=commit,
+        expected_property_values(), version=expected_version, **overrides,
     )
+    assert upload_url in (workspace / "outputs").read_text()
+    assert os.environ["GITHUB_SHA"] == DEFAULT_CONTEXT_ENV["GITHUB_SHA"]
+
+
+@pytest.mark.parametrize("commit", ["../bad", "ab/cdef", "ab-cdef", "ab+cdef", "a b", "a\nshort_commit=forged"])
+def test_unsafe_source_commit_short_name_stops_before_upload(commit, make_file, run_upload, workspace):
+    make_file()
+    code, transport = run_upload(inputs=dict(
+        DEFAULT_INPUTS, version="", source_properties=json.dumps({"commit": commit}),
+    ))
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
 
 
 @pytest.mark.parametrize("key", ["commit", "log_url", "run_id", "run_attempt"])
@@ -1222,6 +1243,7 @@ def test_nightly_keeps_only_requested_jobs_and_steps(nightly_workflow):
     assert job["steps"][rename_index - 1]["name"] == "Collect wheels into dist"
     assert job["steps"][rename_index]["name"] == "Rename collected wheel"
     assert job["steps"][rename_index]["id"] == "rename-wheel"
+    assert job["steps"][rename_index]["env"] == {"SOURCE_PROPERTIES": "${{ inputs.source_properties }}"}
     assert job["steps"][rename_index + 1]["name"] == "Upload collected wheel artifacts"
     without_rename = job["steps"][:rename_index] + job["steps"][rename_index + 1:]
     assert without_rename[:cutoff] == original_job["steps"][:cutoff]
@@ -1333,7 +1355,8 @@ def run_nightly_rename(nightly_workflow, workspace):
         environment = dict(os.environ, SOURCE_SHA="abcdef1" + "0" * 33,
                            GITHUB_SHA="1234567" + "0" * 33, RELEASE_VERSION="not-the-wheel-version",
                            RUNTIME_VERSION="13.0.0", OS_VERSION="ubuntu2204", SDK_VERSION="2.2.1",
-                           TEST_PYTHON=sys.executable, GITHUB_OUTPUT=str(workspace / "rename-output"))
+                           SOURCE_PROPERTIES="{}", TEST_PYTHON=sys.executable,
+                           GITHUB_OUTPUT=str(workspace / "rename-output"))
         environment.update(overrides)
         shim = 'python3() { "$TEST_PYTHON" "$@"; }\n'
         return subprocess.run(["bash", "-e"], input=shim + step["run"], cwd=workspace,
@@ -1367,6 +1390,43 @@ def test_nightly_rename_uses_wheel_version_and_preserves_contents(
     with zipfile.ZipFile(expected) as wheel:
         assert wheel.read("demo_package-1.2.3.dist-info/METADATA") == b"Name: demo_package\nVersion: 1.2.3\n"
         assert wheel.read("demo_package-1.2.3.dist-info/RECORD") == b"unchanged record\n"
+
+
+@pytest.mark.parametrize("commit,short_commit", [
+    (None, "abcdef1"), ("", "abcdef1"), ("7654321" + "a" * 33, "7654321"),
+    ("ABCDEF9876543210", "ABCDEF9"), ("custom7-commit", "custom7"), ("abc", "abc"),
+])
+def test_nightly_rename_commit_override(commit, short_commit, make_file, run_nightly_rename, workspace):
+    original = make_file(filename="demo_package-1.2.3-py3-none-any.whl", directory="dist")
+    properties = {"branch": "property-only", "tag": ""}
+    if commit is not None:
+        properties["commit"] = commit
+    result = run_nightly_rename(SOURCE_PROPERTIES=json.dumps(properties))
+    assert result.returncode == 0, result.stderr
+    wheel = original.with_name(
+        f"demo_package-1.2.3+{short_commit}.cuda13.0.0.ubuntu2204.sdk2.2.1-py3-none-any.whl"
+    )
+    assert wheel.read_bytes() == b"payload"
+    assert not original.exists()
+    assert (workspace / "rename-output").read_text() == f"short_commit={short_commit}\n"
+
+
+@pytest.mark.parametrize("source_properties", [
+    "", "{", "[]", '{"commit":null}', '{"commit":123}', '{"unknown":"value"}',
+    *(json.dumps({"commit": commit}) for commit in (
+        "../bad", "ab/cdef", "ab-cdef", "ab+cdef", "a b", "a\nshort_commit=forged",
+    )),
+])
+def test_nightly_rename_rejects_invalid_source_properties(
+    source_properties, make_file, run_nightly_rename, workspace,
+):
+    original = make_file(filename="demo_package-1.2.3-py3-none-any.whl", directory="dist")
+    result = run_nightly_rename(SOURCE_PROPERTIES=source_properties)
+    assert result.returncode != 0
+    assert "::error::" in result.stderr
+    assert original.read_bytes() == b"payload"
+    assert list(original.parent.iterdir()) == [original]
+    assert not (workspace / "rename-output").exists()
 
 
 @pytest.mark.parametrize("case", [
@@ -1687,7 +1747,10 @@ def test_nightly_resolved_sha_remains_fixed_after_branch_updates(run_nightly_sou
 @pytest.mark.parametrize("version", ["", "custom-upload-directory"])
 @pytest.mark.parametrize("package_type", ["pypi", "custom-package"])
 @pytest.mark.parametrize("upload_repository", ["", "release-team/wheel-packages"])
-@pytest.mark.parametrize("source_properties", ["{}", '{"branch":"metadata-branch","commit":"","tag":""}'])
+@pytest.mark.parametrize("source_properties", [
+    "{}", '{"branch":"metadata-branch","commit":"","tag":""}',
+    '{"branch":"metadata-branch","commit":"7654321abcdef0123456789abcdef0123456789ab","tag":""}',
+])
 def test_nightly_selected_source_reaches_upload_version_and_properties(
     requested, checkout, branch, tag, version, package_type, upload_repository, source_properties,
     nightly_workflow, run_nightly_source, nightly_source_repository, make_file, nightly_wheel_bytes, run_nightly_rename,
@@ -1706,10 +1769,14 @@ def test_nightly_selected_source_reaches_upload_version_and_properties(
     }
     original = make_file(filename="demo_package-1.2.3+custom-py3-none-any.whl", directory="dist",
                          content=nightly_wheel_bytes)
-    result = run_nightly_rename(SOURCE_SHA=source["sha"], SDK_VERSION="2.2.0")
+    overrides = json.loads(source_properties)
+    short_commit = (overrides.get("commit", "") or source["sha"])[:7]
+    result = run_nightly_rename(SOURCE_SHA=source["sha"], SDK_VERSION="2.2.0",
+                                SOURCE_PROPERTIES=source_properties)
     assert result.returncode == 0, result.stderr
+    assert (original.parent.parent / "rename-output").read_text() == f"short_commit={short_commit}\n"
     wheel = original.with_name(
-        f"demo_package-1.2.3+custom.{source['sha'][:7]}.cuda13.0.0.ubuntu2204.sdk2.2.0-py3-none-any.whl"
+        f"demo_package-1.2.3+custom.{short_commit}.cuda13.0.0.ubuntu2204.sdk2.2.0-py3-none-any.whl"
     )
     upload = next(step for step in nightly_workflow["jobs"]["matrix-job"]["steps"] if step.get("id") == "upload")
     mapping, _ = upload["run"].rstrip().rsplit("\n", 1)
@@ -1748,7 +1815,7 @@ PY
     assert code == 0
     assert transport.call_count == 2
     upload_url, upload_source = _last_curl_flags(_curl_args(transport)[0])
-    expected_version = version or f"nightly-custom+{source['sha'][:7]}.ppu2.2.0"
+    expected_version = version or f"nightly-custom+{short_commit}.ppu2.2.0"
     repository = upload_repository or CALLER_REPOSITORY
     assert unquote(upload_url) == f"{BASE_URL}/{repository}/{expected_version}/{wheel.name}"
     assert upload_source == str(wheel)

@@ -127,13 +127,15 @@ Nightly also exposes an optional `source_properties` string input, defaulting to
 
 ```yaml
 with:
-  source_properties: '{"branch":"release/main","commit":"custom-commit","tag":""}'
+  source_properties: '{"branch":"release/main","commit":"7654321abcdef0123456789abcdef0123456789ab","tag":""}'
 ```
 
 - An omitted key keeps the automatically resolved source property; omitting `source_properties` or passing `'{}'` keeps all three automatic values.
 - A present key overrides the property with its exact string value, including `""`. For example, `'{"commit":""}'` sends an explicitly empty `commit` property instead of falling back to the source SHA.
 - Values must be strings; `null`, numbers, arrays, malformed JSON, and keys other than `branch`, `commit`, and `tag` are rejected before any upload request.
-- These overrides affect only item Properties. The existing `branch` input still selects the source checkout; automatic version naming and wheel filenames still use the resolved source SHA. `log_url`, `run_id`, and `run_attempt` remain context-derived.
+- A non-empty `source_properties.commit` supplies its first 7 characters for both the wheel build suffix and the automatically generated upload `version` (and the GitHub archive name). For example, the commit above produces `7654321` in both names. If the key is omitted or its value is `""`, naming falls back to the resolved source SHA, while an explicitly empty `commit` property remains empty.
+- The short commit used in names may contain only letters, digits, dots, or underscores; unsafe characters are rejected before renaming or uploading. The full supplied string is kept as the `commit` property. A non-empty explicit `version` still takes precedence for the upload directory, without changing the wheel suffix.
+- The existing `branch` input still selects the source checkout, and all matrix jobs remain pinned to the resolved source SHA regardless of property overrides. `branch` and `tag` overrides affect only Properties; `log_url`, `run_id`, and `run_attempt` remain context-derived.
 - This input is available on `nightly-build.yml`, not on the standalone `upload-artifact-properties.yml` workflow documented above. Reference matching workflow and script revisions through `uses` and `template_ref`.
 
 ## Secrets

@@ -122,10 +122,17 @@ def resolve_version(inputs, env):
             "package_version", string_input(inputs, "package_version"), SEGMENT_PATTERN,
         )
         sdk_version = string_input(inputs, "sdk_version", "")
-        commit = env.get("GITHUB_SHA", "")
-        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{7,}", commit):
-            raise ValueError("GITHUB_SHA must contain at least 7 hexadecimal characters to derive version")
-        version = f"{package_version}+{commit[:7]}"
+        commit = parse_source_properties(inputs).get("commit", "")
+        if commit:
+            short_commit = commit[:7]
+            if not re.fullmatch(r"[A-Za-z0-9._]{1,7}", short_commit):
+                raise ValueError("source_properties.commit short commit must contain only letters, digits, dots, or underscores")
+        else:
+            commit = env.get("GITHUB_SHA", "")
+            if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{7,}", commit):
+                raise ValueError("GITHUB_SHA must contain at least 7 hexadecimal characters to derive version")
+            short_commit = commit[:7]
+        version = f"{package_version}+{short_commit}"
         # The .ppu{sdk_version} suffix is appended only when an SDK version is provided.
         if sdk_version:
             version += f".ppu{validate_segment('sdk_version', sdk_version, SEGMENT_PATTERN)}"

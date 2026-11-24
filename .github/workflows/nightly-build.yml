@@ -65,7 +65,7 @@ on:
         required: true
         type: string
       source_properties:
-        description: 'Optional JSON object overriding only branch, commit, and tag properties; omitted keys use resolved source metadata; explicit empty strings are preserved; does not affect checkout or version generation'
+        description: 'Optional JSON object overriding branch, commit, and tag properties; omitted keys use resolved metadata; explicit empty strings are preserved; non-empty commit supplies the first 7 characters for wheel names and automatic upload versions, otherwise use the resolved SHA; checkout is unchanged'
         required: false
         type: string
         default: '{}'
@@ -425,6 +425,8 @@ jobs:
       - name: Rename collected wheel
         id: rename-wheel
         shell: bash
+        env:
+          SOURCE_PROPERTIES: ${{ inputs.source_properties }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -442,7 +444,18 @@ jobs:
           source_sha = os.environ["SOURCE_SHA"]
           if not re.fullmatch(r"[0-9a-fA-F]{40}", source_sha):
               raise SystemExit("::error::SOURCE_SHA must be the resolved source commit")
-          key_str = (f"{source_sha[:7]}.cuda{os.environ['RUNTIME_VERSION']}."
+          try:
+              source_properties = json.loads(os.environ["SOURCE_PROPERTIES"])
+          except json.JSONDecodeError:
+              raise SystemExit("::error::source_properties must be a valid JSON object") from None
+          if (not isinstance(source_properties, dict)
+                  or set(source_properties) - {"branch", "commit", "tag"}
+                  or any(not isinstance(value, str) for value in source_properties.values())):
+              raise SystemExit("::error::source_properties must contain only string branch, commit, and tag values")
+          short_commit = (source_properties.get("commit", "") or source_sha)[:7]
+          if not re.fullmatch(r"[A-Za-z0-9._]{1,7}", short_commit):
+              raise SystemExit("::error::source_properties.commit short commit must contain only letters, digits, dots, or underscores")
+          key_str = (f"{short_commit}.cuda{os.environ['RUNTIME_VERSION']}."
                      f"{os.environ['OS_VERSION']}.sdk{os.environ['SDK_VERSION']}")
           if not re.fullmatch(r"[A-Za-z0-9._]+", key_str):
               raise SystemExit("::error::wheel suffix must contain only letters, digits, dots, or underscores")
@@ -457,7 +470,7 @@ jobs:
               raise SystemExit("::error::renamed wheel already exists; refusing to overwrite")
           wheel.rename(target)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"short_commit={source_sha[:7]}\n")
+              output.write(f"short_commit={short_commit}\n")
           print("Renamed wheel: " + json.dumps(target.name))
           PY
 
