@@ -131,6 +131,7 @@ def run_upload(uploader, workspace, monkeypatch):
     def run(inputs=None, **environment):
         env = {
             "ARTIFACT_DIR": str(workspace / "artifact"),
+            "ARTIFACT_PATTERN": "",
             "GITHUB_REPOSITORY": CALLER_REPOSITORY,
             "INPUTS_JSON": json.dumps(DEFAULT_INPUTS if inputs is None else inputs),
             "RELEASE_USERNAME": "test-user",
@@ -583,6 +584,24 @@ def test_multiple_files_upload_sequentially(make_file, run_upload):
         assert upload_source == str(path)
         assert storage_url.startswith(STORAGE_DIR + path.name + "?properties=")
         assert _query_pairs(storage_url) == expected_property_values()
+
+
+@pytest.mark.parametrize("case", ["non-wheel", "nested-wheel", "symlink", "directory"])
+def test_wheel_pattern_without_regular_top_level_matches_stops_before_upload(
+    case, make_file, run_upload, workspace,
+):
+    make_file(filename="notes.txt", directory="dist")
+    if case == "nested-wheel":
+        make_file(filename="nested.whl", directory="dist/subdir")
+    elif case == "symlink":
+        target = make_file(filename="outside.whl", directory="elsewhere")
+        (workspace / "dist" / "linked.whl").symlink_to(target)
+    elif case == "directory":
+        (workspace / "dist" / "directory.whl").mkdir()
+    code, transport = run_upload(ARTIFACT_DIR=str(workspace / "dist"), ARTIFACT_PATTERN="*.whl")
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
 
 
 def test_duplicate_basenames_both_upload_to_the_same_destination(make_file, run_upload):
@@ -1206,29 +1225,29 @@ def test_nightly_keeps_only_requested_jobs_and_steps(nightly_workflow):
     assert job["steps"][rename_index + 1]["name"] == "Upload collected wheel artifacts"
     without_rename = job["steps"][:rename_index] + job["steps"][rename_index + 1:]
     assert without_rename[:cutoff] == original_job["steps"][:cutoff]
-    guard, checkout, setup, download, upload = without_rename[cutoff:]
+    guard, checkout, setup, upload = without_rename[cutoff:]
     original_guard, original_checkout, original_setup, original_download, original_upload = (
         properties["jobs"]["upload-artifact"]["steps"]
     )
     assert [step["name"] for step in without_rename[cutoff:]] == [
         original_guard["name"], original_checkout["name"], original_setup["name"],
-        "Download and extract wheel artifact", "Upload wheels and set Artifactory properties",
+        "Upload wheels and set Artifactory properties",
     ]
     assert not artifact_name.endswith(".zip")
     assert guard == dict(original_guard, env={"ARTIFACT_NAME": artifact_name})
     assert checkout == original_checkout
     assert setup == original_setup
-    assert download == dict(original_download, name="Download and extract wheel artifact", **{
-        "with": dict(original_download["with"], name=artifact_name, **{"skip-decompress": "false"}),
-    })
+    assert all(not step.get("uses", "").startswith("actions/download-artifact@") for step in job["steps"])
+    assert original_download not in job["steps"]
     original_env = {key: value for key, value in original_upload["env"].items()
                     if key not in ("GITHUB_SHA", "GITHUB_BRANCH", "GITHUB_TAG")}
     assert upload["env"] == dict(
         original_env, MATRIX_JSON="${{ toJSON(matrix) }}",
         PACKAGE_NAME="${{ needs.prepare-matrix.outputs.package_name }}",
+        ARTIFACT_DIR="${{ github.workspace }}/dist", ARTIFACT_PATTERN="*.whl",
     )
     assert upload["run"].rstrip().endswith(original_upload["run"])
-    assert upload["env"]["ARTIFACT_DIR"] == download["with"]["path"]
+    assert original_job["steps"][cutoff - 1]["with"]["path"] == "dist/*.whl"
     for step in job["steps"]:
         assert "if" not in step
         assert "continue-on-error" not in step
@@ -1360,9 +1379,9 @@ def test_nightly_rename_rejects_unsafe_or_ambiguous_files(case, workspace, make_
     assert after == before
 
 
-@pytest.mark.parametrize("case", ["zip", "empty", "multiple", "extra-file", "symlink", "directory", "root-symlink"])
+@pytest.mark.parametrize("case", ["zip", "empty", "multiple", "symlink", "directory", "root-symlink"])
 def test_nightly_upload_rejects_non_wheel_artifacts(case, nightly_workflow, workspace, make_file):
-    directory = workspace / "artifact"
+    directory = workspace / "dist"
     directory.mkdir()
     if case == "root-symlink":
         link = workspace / "linked-artifact"
@@ -1375,32 +1394,17 @@ def test_nightly_upload_rejects_non_wheel_artifacts(case, nightly_workflow, work
         elif case == "directory":
             (directory / filename).mkdir()
         else:
-            make_file(filename=filename)
-            if case in ("multiple", "extra-file"):
-                make_file(filename="other.whl" if case == "multiple" else "notes.txt")
+            make_file(filename=filename, directory="dist")
+            if case == "multiple":
+                make_file(filename="other.whl", directory="dist")
     mapping, _ = nightly_workflow["jobs"]["matrix-job"]["steps"][-1]["run"].rstrip().rsplit("\n", 1)
-    environment = dict(os.environ, ARTIFACT_DIR=str(directory), TEST_PYTHON=sys.executable)
+    environment = dict(os.environ, ARTIFACT_DIR=str(directory), ARTIFACT_PATTERN="*.whl", TEST_PYTHON=sys.executable)
     shim = 'python() { "$TEST_PYTHON" "$@"; }\n'
     result = subprocess.run(["bash", "-e"], input=shim + mapping, env=environment,
                             text=True, capture_output=True, timeout=10)
     assert result.returncode != 0
     assert "::error::" in result.stderr
     assert not (workspace / "outputs").exists()
-
-
-@pytest.fixture
-def extract_nightly_artifact(workspace):
-    def extract(wheel):
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as artifact:
-            artifact.write(wheel, arcname=wheel.name)
-        directory = workspace / "artifact"
-        directory.mkdir()
-        with zipfile.ZipFile(io.BytesIO(buffer.getvalue())) as artifact:
-            artifact.extractall(directory)
-        return directory / wheel.name
-
-    return extract
 
 
 @pytest.mark.parametrize("python_version,os_version", [
@@ -1413,7 +1417,7 @@ def extract_nightly_artifact(workspace):
 @pytest.mark.parametrize("package_edition", ["standard", "enterprise"])
 def test_nightly_matrix_properties_reach_uploader(
     nightly_workflow, python_version, os_version, sdk_version, torch_version, version, package_version,
-    package_edition, make_file, nightly_wheel_bytes, run_nightly_rename, extract_nightly_artifact, request,
+    package_edition, make_file, nightly_wheel_bytes, run_nightly_rename, request,
 ):
     contract = nightly_workflow["on"]["workflow_call"]
     inputs = {key: definition.get("default", "") for key, definition in contract["inputs"].items()}
@@ -1434,14 +1438,15 @@ def test_nightly_matrix_properties_reach_uploader(
     filename = f"demo_package-1.2.3+abcdef1.cuda13.0.0.{os_version}.sdk{sdk_version}-py3-none-any.whl"
     wheel = original.with_name(filename)
     assert not original.exists()
-    archive = extract_nightly_artifact(wheel)
+    notes = make_file(filename="notes.txt", directory="dist", content=b"keep locally")
+    nested = make_file(filename="nested.whl", directory="dist/subdir", content=b"do not upload")
     result = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c",
          mapping + '\npython -c \'import os; print(os.environ["INPUTS_JSON"])\''],
         env=dict(os.environ, INPUTS_JSON=json.dumps(inputs), MATRIX_JSON=json.dumps(matrix),
                  PACKAGE_NAME="demo_package", PATH=f"{Path(sys.executable).parent}:{os.environ['PATH']}",
                  SOURCE_SHA=DEFAULT_CONTEXT_ENV["GITHUB_SHA"], SOURCE_BRANCH="main", SOURCE_TAG="",
-                 ARTIFACT_DIR=str(archive.parent)),
+                 ARTIFACT_DIR=str(wheel.parent), ARTIFACT_PATTERN=upload["env"]["ARTIFACT_PATTERN"]),
         text=True, capture_output=True, timeout=10,
     )
     assert result.returncode == 0, result.stderr
@@ -1449,16 +1454,19 @@ def test_nightly_matrix_properties_reach_uploader(
     assert metadata == dict(inputs, package_type="binary", package_name="demo_package",
                             os=os_version, python_version=python_version, runtime="13.0.0",
                             torch_version=torch_version, sdk_version=sdk_version)
-    assert list(archive.parent.iterdir()) == [archive]
-    assert archive.read_bytes() == nightly_wheel_bytes
-    code, transport = request.getfixturevalue("run_upload")(inputs=metadata)
+    assert wheel.read_bytes() == nightly_wheel_bytes
+    code, transport = request.getfixturevalue("run_upload")(
+        inputs=metadata, ARTIFACT_DIR=str(wheel.parent), ARTIFACT_PATTERN=upload["env"]["ARTIFACT_PATTERN"],
+    )
     assert code == 0
     assert transport.call_count == 2
     url, source = _last_curl_flags(_curl_args(transport)[0])
     expected_version = version or f"{package_version}+abcdef1.ppu{sdk_version}"
-    assert unquote(url) == f"{BASE_URL}/{CALLER_REPOSITORY}/{expected_version}/{archive.name}"
-    assert source == str(archive)
-    assert archive.read_bytes() == nightly_wheel_bytes
+    assert unquote(url) == f"{BASE_URL}/{CALLER_REPOSITORY}/{expected_version}/{wheel.name}"
+    assert source == str(wheel)
+    assert wheel.read_bytes() == nightly_wheel_bytes
+    assert notes.read_bytes() == b"keep locally"
+    assert nested.read_bytes() == b"do not upload"
     storage_url, _ = _last_curl_flags(_curl_args(transport)[1])
     assert _query_pairs(storage_url) == dict(
         expected_property_values(), package_type="binary", os=os_version,
@@ -1651,7 +1659,7 @@ def test_nightly_resolved_sha_remains_fixed_after_branch_updates(run_nightly_sou
 def test_nightly_selected_source_reaches_upload_version_and_properties(
     requested, checkout, branch, tag, version, package_type, upload_repository, source_properties,
     nightly_workflow, run_nightly_source, nightly_source_repository, make_file, nightly_wheel_bytes, run_nightly_rename,
-    extract_nightly_artifact, request,
+    request,
 ):
     repo = nightly_source_repository
     requested = repo["sha"] if requested == "$sha" else requested
@@ -1671,8 +1679,8 @@ def test_nightly_selected_source_reaches_upload_version_and_properties(
     wheel = original.with_name(
         f"demo_package-1.2.3+custom.{source['sha'][:7]}.cuda13.0.0.ubuntu2204.sdk2.2.0-py3-none-any.whl"
     )
-    archive = extract_nightly_artifact(wheel)
-    mapping, _ = nightly_workflow["jobs"]["matrix-job"]["steps"][-1]["run"].rstrip().rsplit("\n", 1)
+    upload = nightly_workflow["jobs"]["matrix-job"]["steps"][-1]
+    mapping, _ = upload["run"].rstrip().rsplit("\n", 1)
     capture = '''
 python - <<'PY'
 import json
@@ -1692,7 +1700,7 @@ PY
                        SOURCE_BRANCH=source["branch"], SOURCE_TAG=source["tag"],
                        GITHUB_SHA=repo["trigger"], GITHUB_BRANCH="trigger-branch",
                        GITHUB_TAG="trigger-tag", TEST_PYTHON=sys.executable,
-                       ARTIFACT_DIR=str(archive.parent))
+                       ARTIFACT_DIR=str(wheel.parent), ARTIFACT_PATTERN=upload["env"]["ARTIFACT_PATTERN"])
     shim = 'python() { "$TEST_PYTHON" "$@"; }\n'
     result = subprocess.run(["bash", "-e"], input=shim + mapping + capture, env=environment,
                             text=True, capture_output=True, timeout=10)
@@ -1700,18 +1708,19 @@ PY
     captured = json.loads(result.stdout)
     assert captured["context"] == dict(DEFAULT_CONTEXT_ENV, GITHUB_SHA=source["sha"],
                                        GITHUB_BRANCH=branch, GITHUB_TAG=tag)
-    assert list(archive.parent.iterdir()) == [archive]
+    assert list(wheel.parent.iterdir()) == [wheel]
     code, transport = request.getfixturevalue("run_upload")(
         inputs=captured["inputs"], **captured["context"],
+        ARTIFACT_DIR=str(wheel.parent), ARTIFACT_PATTERN=upload["env"]["ARTIFACT_PATTERN"],
     )
     assert code == 0
     assert transport.call_count == 2
     upload_url, upload_source = _last_curl_flags(_curl_args(transport)[0])
     expected_version = version or f"nightly-custom+{source['sha'][:7]}.ppu2.2.0"
     repository = upload_repository or CALLER_REPOSITORY
-    assert unquote(upload_url) == f"{BASE_URL}/{repository}/{expected_version}/{archive.name}"
-    assert upload_source == str(archive)
-    assert archive.read_bytes() == nightly_wheel_bytes
+    assert unquote(upload_url) == f"{BASE_URL}/{repository}/{expected_version}/{wheel.name}"
+    assert upload_source == str(wheel)
+    assert wheel.read_bytes() == nightly_wheel_bytes
     storage_url, _ = _last_curl_flags(_curl_args(transport)[1])
     expected_properties = dict(
         expected_property_values(), package_type=package_type, package_version="nightly-custom",

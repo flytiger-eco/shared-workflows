@@ -132,9 +132,15 @@ def resolve_version(inputs, env):
     return validate_segment("version", version, SEGMENT_PATTERN)
 
 
-def find_files(root):
+def find_files(root, pattern=""):
     if root.is_symlink() or not root.is_dir():
         raise ValueError("artifact directory does not exist or is not a regular directory")
+    # Nightly selects its local dist/*.whl; standalone uploads retain recursive selection.
+    if pattern:
+        matches = sorted(path for path in root.glob(pattern) if not path.is_symlink() and path.is_file())
+        if not matches:
+            raise ValueError("No regular files matching ARTIFACT_PATTERN found in the artifact")
+        return matches
 
     def scan_error(error):
         raise error
@@ -320,7 +326,7 @@ def main():
         token = os.environ.get("RELEASE_TOKEN", "")
         validate_credentials(username, token)
 
-        paths = find_files(Path(artifact_dir))
+        paths = find_files(Path(artifact_dir), os.environ.get("ARTIFACT_PATTERN", ""))
         batch_url = f"{ARTIFACTORY_BASE_URL}/{encoded_prefix}/"
         upload_urls = []
         for path in paths:

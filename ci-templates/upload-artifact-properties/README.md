@@ -121,7 +121,9 @@ The following item properties are populated by the template workflow from GitHub
 
 ### Nightly Build Source Property Overrides
 
-The separate [Nightly Build workflow](../../.github/workflows/nightly-build.yml) reuses this upload script and exposes an optional `source_properties` string input, defaulting to `'{}'`. It accepts a JSON object containing only `branch`, `commit`, and `tag`:
+The separate [Nightly Build workflow](../../.github/workflows/nightly-build.yml) keeps the GitHub artifact upload for archiving, then uploads the renamed local `dist/*.whl` directly to Artifactory in the same matrix job. It does not download or extract the GitHub artifact again. Only the single regular wheel at the top level of `dist` is selected; other files and subdirectories are left untouched and are not uploaded. The standalone workflow documented above still downloads and uploads the raw artifact ZIP.
+
+Nightly also exposes an optional `source_properties` string input, defaulting to `'{}'`. It accepts a JSON object containing only `branch`, `commit`, and `tag`:
 
 ```yaml
 with:

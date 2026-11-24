@@ -495,13 +495,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Download and extract wheel artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ needs.prepare-matrix.outputs.package_name }}-${{ inputs.package_version }}-${{ steps.rename-wheel.outputs.short_commit }}-${{ inputs.package_edition }}-cuda${{ matrix.runtime_version }}${{ matrix.torch_version != '' && format('-torch{0}', matrix.torch_version) || '' }}-${{ matrix.os_version }}-py${{ matrix.python_version }}-sdk${{ matrix.sdk_version }}
-          path: ${{ runner.temp }}/upload-artifact-properties-source
-          skip-decompress: false
-
       - name: Upload wheels and set Artifactory properties
         id: upload
         shell: bash
@@ -509,7 +502,8 @@ jobs:
           INPUTS_JSON: ${{ toJSON(inputs) }}
           MATRIX_JSON: ${{ toJSON(matrix) }}
           PACKAGE_NAME: ${{ needs.prepare-matrix.outputs.package_name }}
-          ARTIFACT_DIR: ${{ runner.temp }}/upload-artifact-properties-source
+          ARTIFACT_DIR: ${{ github.workspace }}/dist
+          ARTIFACT_PATTERN: '*.whl'
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -527,10 +521,9 @@ jobs:
           artifact_dir = Path(os.environ["ARTIFACT_DIR"])
           if artifact_dir.is_symlink() or not artifact_dir.is_dir():
               raise SystemExit("::error::artifact directory must be a regular directory")
-          wheels = list(artifact_dir.iterdir())
-          if (len(wheels) != 1 or wheels[0].is_symlink()
-                  or not wheels[0].is_file() or wheels[0].suffix != ".whl"):
-              raise SystemExit("::error::expected exactly one extracted wheel before uploading")
+          wheels = list(artifact_dir.glob(os.environ["ARTIFACT_PATTERN"]))
+          if len(wheels) != 1 or wheels[0].is_symlink() or not wheels[0].is_file():
+              raise SystemExit("::error::expected exactly one regular wheel in dist before uploading")
           inputs = json.loads(os.environ["INPUTS_JSON"])
           matrix = json.loads(os.environ["MATRIX_JSON"])
           inputs.update({
