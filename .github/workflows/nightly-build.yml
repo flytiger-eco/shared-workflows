@@ -64,6 +64,11 @@ on:
         description: 'Bash build command executed in the root directory of the calling repository; multi-line is supported; only trusted configuration is accepted'
         required: true
         type: string
+      upload_repository:
+        description: 'Optional owner/repository override for the Artifactory upload path; when empty, use the calling repository; source metadata and log URLs are unchanged'
+        required: false
+        type: string
+        default: ''
       version:
         description: 'Optional Artifactory directory and version property; when empty, generated as {package_version}+{short_commit}.ppu{sdk_version} for each matrix entry'
         required: false

@@ -500,6 +500,45 @@ def test_run_metadata_changes_properties_without_changing_paths(
     )
 
 
+@pytest.mark.parametrize("upload_repository", ["", "release-team/wheel-packages", "alice/.github"])
+def test_upload_repository_overrides_paths_without_changing_context(
+    upload_repository, make_file, run_upload, workspace,
+):
+    make_file()
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, upload_repository=upload_repository))
+    assert code == 0
+    repository = upload_repository or CALLER_REPOSITORY
+    upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert upload_url == f"{BASE_URL}/{repository}/{VERSION}/{DEMO_FILENAME}"
+    assert storage_url.partition("?")[0] == (
+        "https://pkg.flytiger-eco.com/artifactory/api/storage/github_generic/nightly/"
+        f"{repository}/{VERSION}/{DEMO_FILENAME}"
+    )
+    assert _query_pairs(storage_url) == expected_property_values()
+    assert os.environ["GITHUB_REPOSITORY"] == CALLER_REPOSITORY
+    assert (workspace / "outputs").read_text() == (
+        f"batch_url={BASE_URL}/{repository}/{VERSION}/\nupload_urls<<UPLOAD_URLS_EOF\n"
+        f"{upload_url}\nUPLOAD_URLS_EOF\n"
+    )
+
+
+@pytest.mark.parametrize("upload_repository", [
+    "owner", "owner/", "/repo", "owner/repo/extra", "../repo", "owner/.", "owner/..",
+    "owner/%2e%2e", "owner/repo?x=1", "owner/repo#frag", "owner/repo name", "owner/repo\\name",
+    "https://other.invalid/owner/repo", " ", 123, False, [], {},
+])
+def test_invalid_upload_repository_stops_before_upload(
+    upload_repository, make_file, run_upload, workspace, capsys,
+):
+    make_file()
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, upload_repository=upload_repository))
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+    assert "upload_repository" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("repository", [
     "", "owner", "owner/", "/repo", "owner/repo/extra", "../repo", "owner/.", "owner/..",
     "owner/%2e%2e", "owner/repo?x=1", "owner/repo#frag", "owner/repo name", "owner/repo\\name",
@@ -1033,13 +1072,16 @@ def test_nightly_contract_keeps_matrix_entry_and_adds_upload_metadata(nightly_wo
                       if key != "tag_version"}
     properties_inputs = properties["on"]["workflow_call"]["inputs"]
     additions = {"version", "package_version", "package_edition", "runtime_type", "extra_info"}
-    assert set(contract["inputs"]) == set(release_inputs) | additions | {"branch", "package_type", "runs_on"}
+    assert set(contract["inputs"]) == set(release_inputs) | additions | {
+        "branch", "package_type", "runs_on", "upload_repository",
+    }
     expected_inputs = {**release_inputs, **{key: properties_inputs[key] for key in additions}}
     expected_inputs["sdk_versions"] = dict(release_inputs["sdk_versions"], default='["2.2.1"]')
     expected_inputs["package_type"] = {"type": "string", "required": "false", "default": "binary"}
     # Nightly names its wheel artifacts with package_edition, so it stays required there.
     expected_inputs["package_edition"] = {"type": "string", "required": "true"}
     expected_inputs["runs_on"] = {"type": "string", "required": "false", "default": "ubuntu-latest"}
+    expected_inputs["upload_repository"] = {"type": "string", "required": "false", "default": ""}
     for name, expected in expected_inputs.items():
         for field in ("type", "required", "default"):
             assert contract["inputs"][name].get(field) == expected.get(field), (name, field)
@@ -1543,8 +1585,9 @@ def test_nightly_resolved_sha_remains_fixed_after_branch_updates(run_nightly_sou
 ])
 @pytest.mark.parametrize("version", ["", "custom-upload-directory"])
 @pytest.mark.parametrize("package_type", ["pypi", "custom-package"])
+@pytest.mark.parametrize("upload_repository", ["", "release-team/wheel-packages"])
 def test_nightly_selected_source_reaches_upload_version_and_properties(
-    requested, checkout, branch, tag, version, package_type, nightly_workflow, run_nightly_source,
+    requested, checkout, branch, tag, version, package_type, upload_repository, nightly_workflow, run_nightly_source,
     nightly_source_repository, make_file, nightly_wheel_bytes, run_nightly_rename,
     extract_nightly_artifact, request,
 ):
@@ -1554,7 +1597,7 @@ def test_nightly_selected_source_reaches_upload_version_and_properties(
     result, source = run_nightly_source(requested, checkout)
     assert result.returncode == 0, result.stderr
     inputs = dict(DEFAULT_INPUTS, branch=requested, version=version, package_version="nightly-custom",
-                  package_type=package_type)
+                  package_type=package_type, upload_repository=upload_repository)
     matrix = {
         "python_version": "310", "os_version": "ubuntu2204", "runtime_version": "13.0.0",
         "torch_version": "2.13.0", "sdk_version": "2.2.0",
@@ -1603,7 +1646,8 @@ PY
     assert transport.call_count == 2
     upload_url, upload_source = _last_curl_flags(_curl_args(transport)[0])
     expected_version = version or f"nightly-custom+{source['sha'][:7]}.ppu2.2.0"
-    assert unquote(upload_url) == f"{BASE_URL}/{CALLER_REPOSITORY}/{expected_version}/{archive.name}"
+    repository = upload_repository or CALLER_REPOSITORY
+    assert unquote(upload_url) == f"{BASE_URL}/{repository}/{expected_version}/{archive.name}"
     assert upload_source == str(archive)
     assert archive.read_bytes() == nightly_wheel_bytes
     storage_url, _ = _last_curl_flags(_curl_args(transport)[1])

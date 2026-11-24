@@ -190,7 +190,7 @@ def validate_credentials(username, token):
 def build_context(inputs, github_repository):
     repository_match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)", github_repository)
     if repository_match is None or repository_match.group(2) in (".", ".."):
-        raise ValueError("GITHUB_REPOSITORY must be in owner/repository format without path traversal")
+        raise ValueError("upload_repository or GITHUB_REPOSITORY must be in owner/repository format without path traversal")
     owner, repository = repository_match.groups()
     version = validate_segment("version", string_input(inputs, "version"), SEGMENT_PATTERN)
     return "/".join(
@@ -291,7 +291,8 @@ def main():
         if not isinstance(inputs, dict):
             raise ValueError("INPUTS_JSON must be a JSON object")
         inputs["version"] = resolve_version(inputs, os.environ)
-        encoded_prefix = build_context(inputs, os.environ.get("GITHUB_REPOSITORY", ""))
+        upload_repository = string_input(inputs, "upload_repository", "") or os.environ.get("GITHUB_REPOSITORY", "")
+        encoded_prefix = build_context(inputs, upload_repository)
         property_query = build_property_query(inputs, os.environ)
         username = os.environ.get("RELEASE_USERNAME", "")
         token = os.environ.get("RELEASE_TOKEN", "")
