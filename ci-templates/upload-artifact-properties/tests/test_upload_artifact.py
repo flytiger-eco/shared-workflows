@@ -670,6 +670,66 @@ def test_non_pypi_package_allows_empty_build_metadata(package_type, make_file, r
     )
 
 
+@pytest.mark.parametrize("branch", [None, "", "release/main"])
+@pytest.mark.parametrize("commit", [None, "", "custom-commit"])
+@pytest.mark.parametrize("tag", [None, "", "custom-tag"])
+def test_source_properties_distinguish_omitted_empty_and_nonempty_values(
+    branch, commit, tag, make_file, run_upload,
+):
+    make_file()
+    overrides = {key: value for key, value in {"branch": branch, "commit": commit, "tag": tag}.items()
+                 if value is not None}
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, source_properties=json.dumps(overrides)))
+    assert code == 0
+    upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert upload_url == UPLOAD_DIR + DEMO_FILENAME
+    assert _query_pairs(storage_url) == dict(expected_property_values(), **overrides)
+    assert all(os.environ[key] == value for key, value in DEFAULT_CONTEXT_ENV.items())
+
+
+@pytest.mark.parametrize("key", ["branch", "commit", "tag"])
+def test_source_property_overrides_are_escaped(key, make_file, run_upload):
+    make_file()
+    value = "a,b|c=d;next&recursive=1#%+\\path"
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, source_properties=json.dumps({key: value})))
+    assert code == 0
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert _query_pairs(storage_url) == dict(expected_property_values(), **{key: value})
+
+
+@pytest.mark.parametrize("source_properties", [
+    "", " ", "{", "[]", "null", '"value"', "123", "false", None, 123, [], {},
+    *(json.dumps({key: value}) for key in ("branch", "commit", "tag")
+      for value in (None, 123, False, [], {})),
+    *(json.dumps({key: "override"}) for key in ("log_url", "run_id", "run_attempt", "unknown")),
+])
+def test_invalid_source_properties_stop_before_any_request(
+    source_properties, make_file, run_upload, workspace, capsys,
+):
+    make_file()
+    code, transport = run_upload(inputs=dict(DEFAULT_INPUTS, source_properties=source_properties))
+    assert code == 1
+    transport.assert_not_called()
+    assert not (workspace / "outputs").exists()
+    assert "source_properties" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("commit", ["", "custom-commit"])
+def test_source_commit_override_does_not_change_automatic_version(commit, make_file, run_upload):
+    make_file()
+    code, transport = run_upload(inputs=dict(
+        DEFAULT_INPUTS, version="", source_properties=json.dumps({"commit": commit}),
+    ))
+    assert code == 0
+    upload_url = _last_curl_flags(_curl_args(transport)[0])[0]
+    storage_url = _last_curl_flags(_curl_args(transport)[1])[0]
+    assert unquote(upload_url) == f"{BASE_URL}/{CALLER_REPOSITORY}/1.2.3+abcdef1.ppu2.2.0/{DEMO_FILENAME}"
+    assert _query_pairs(storage_url) == dict(
+        expected_property_values(), version="1.2.3+abcdef1.ppu2.2.0", commit=commit,
+    )
+
+
 @pytest.mark.parametrize("key", ["commit", "log_url", "run_id", "run_attempt"])
 def test_missing_required_context_property_stops_before_upload(key, make_file, run_upload):
     make_file()
@@ -1073,7 +1133,7 @@ def test_nightly_contract_keeps_matrix_entry_and_adds_upload_metadata(nightly_wo
     properties_inputs = properties["on"]["workflow_call"]["inputs"]
     additions = {"version", "package_version", "package_edition", "runtime_type", "extra_info"}
     assert set(contract["inputs"]) == set(release_inputs) | additions | {
-        "branch", "package_type", "runs_on", "upload_repository",
+        "branch", "package_type", "runs_on", "upload_repository", "source_properties",
     }
     expected_inputs = {**release_inputs, **{key: properties_inputs[key] for key in additions}}
     expected_inputs["sdk_versions"] = dict(release_inputs["sdk_versions"], default='["2.2.1"]')
@@ -1082,6 +1142,7 @@ def test_nightly_contract_keeps_matrix_entry_and_adds_upload_metadata(nightly_wo
     expected_inputs["package_edition"] = {"type": "string", "required": "true"}
     expected_inputs["runs_on"] = {"type": "string", "required": "false", "default": "ubuntu-latest"}
     expected_inputs["upload_repository"] = {"type": "string", "required": "false", "default": ""}
+    expected_inputs["source_properties"] = {"type": "string", "required": "false", "default": "{}"}
     for name, expected in expected_inputs.items():
         for field in ("type", "required", "default"):
             assert contract["inputs"][name].get(field) == expected.get(field), (name, field)
@@ -1586,9 +1647,10 @@ def test_nightly_resolved_sha_remains_fixed_after_branch_updates(run_nightly_sou
 @pytest.mark.parametrize("version", ["", "custom-upload-directory"])
 @pytest.mark.parametrize("package_type", ["pypi", "custom-package"])
 @pytest.mark.parametrize("upload_repository", ["", "release-team/wheel-packages"])
+@pytest.mark.parametrize("source_properties", ["{}", '{"branch":"metadata-branch","commit":"","tag":""}'])
 def test_nightly_selected_source_reaches_upload_version_and_properties(
-    requested, checkout, branch, tag, version, package_type, upload_repository, nightly_workflow, run_nightly_source,
-    nightly_source_repository, make_file, nightly_wheel_bytes, run_nightly_rename,
+    requested, checkout, branch, tag, version, package_type, upload_repository, source_properties,
+    nightly_workflow, run_nightly_source, nightly_source_repository, make_file, nightly_wheel_bytes, run_nightly_rename,
     extract_nightly_artifact, request,
 ):
     repo = nightly_source_repository
@@ -1597,7 +1659,7 @@ def test_nightly_selected_source_reaches_upload_version_and_properties(
     result, source = run_nightly_source(requested, checkout)
     assert result.returncode == 0, result.stderr
     inputs = dict(DEFAULT_INPUTS, branch=requested, version=version, package_version="nightly-custom",
-                  package_type=package_type, upload_repository=upload_repository)
+                  package_type=package_type, upload_repository=upload_repository, source_properties=source_properties)
     matrix = {
         "python_version": "310", "os_version": "ubuntu2204", "runtime_version": "13.0.0",
         "torch_version": "2.13.0", "sdk_version": "2.2.0",
@@ -1651,8 +1713,10 @@ PY
     assert upload_source == str(archive)
     assert archive.read_bytes() == nightly_wheel_bytes
     storage_url, _ = _last_curl_flags(_curl_args(transport)[1])
-    assert _query_pairs(storage_url) == dict(
+    expected_properties = dict(
         expected_property_values(), package_type=package_type, package_version="nightly-custom",
         version=expected_version, os="ubuntu2204", python_version="310", torch_version="2.13.0",
         commit=source["sha"], branch=branch, tag=tag,
     )
+    expected_properties.update(json.loads(source_properties))
+    assert _query_pairs(storage_url) == expected_properties

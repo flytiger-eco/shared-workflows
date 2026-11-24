@@ -47,9 +47,9 @@ PROPERTY_KEYS = (
     "run_attempt",
     "extra_info",
 )
-# Properties derived from the GitHub Actions context in the wrapper workflow (via env)
-# instead of caller inputs, so the values reflect the actual triggering ref/sha/log URL
-# and cannot be spoofed by the calling repository.
+# Default properties come from the source/context environment rather than same-named
+# inputs. Only branch, commit, and tag may be explicitly overridden by source_properties;
+# log_url, run_id, and run_attempt always retain the actual workflow context.
 CONTEXT_PROPERTY_ENV = {
     "branch": "GITHUB_BRANCH",
     "tag": "GITHUB_TAG",
@@ -153,13 +153,35 @@ def find_files(root):
     return sorted(matches)
 
 
+def parse_source_properties(inputs):
+    raw = inputs.get("source_properties", "{}")
+    if not isinstance(raw, str):
+        raise ValueError("source_properties must be a JSON object string")
+    try:
+        overrides = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("source_properties must be a valid JSON object") from None
+    if not isinstance(overrides, dict):
+        raise ValueError("source_properties must be a JSON object")
+    if set(overrides) - {"branch", "commit", "tag"}:
+        raise ValueError("source_properties only supports branch, commit, and tag")
+    for key, value in overrides.items():
+        if not isinstance(value, str):
+            raise ValueError(f"source_properties.{key} must be a string, including an empty string")
+    return overrides
+
+
 def build_property_query(inputs, env):
-    required_keys = REQUIRED_PROPERTY_KEYS
+    source_properties = parse_source_properties(inputs)
+    # Explicit overrides may be empty, including commit; automatic commit stays required.
+    required_keys = REQUIRED_PROPERTY_KEYS - source_properties.keys()
     if inputs.get("package_type") == PYPI_PACKAGE_TYPE:
         required_keys = required_keys | PYPI_REQUIRED_PROPERTY_KEYS
     pairs = []
     for key in PROPERTY_KEYS:
-        if key in CONTEXT_PROPERTY_ENV:
+        if key in source_properties:
+            value = source_properties[key]
+        elif key in CONTEXT_PROPERTY_ENV:
             value = env.get(CONTEXT_PROPERTY_ENV[key], "")
         elif key == "runtime_type":
             value = string_input(inputs, key, "cuda")

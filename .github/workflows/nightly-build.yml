@@ -64,6 +64,11 @@ on:
         description: 'Bash build command executed in the root directory of the calling repository; multi-line is supported; only trusted configuration is accepted'
         required: true
         type: string
+      source_properties:
+        description: 'Optional JSON object overriding only branch, commit, and tag properties; omitted keys use resolved source metadata; explicit empty strings are preserved; does not affect checkout or version generation'
+        required: false
+        type: string
+        default: '{}'
       upload_repository:
         description: 'Optional owner/repository override for the Artifactory upload path; when empty, use the calling repository; source metadata and log URLs are unchanged'
         required: false

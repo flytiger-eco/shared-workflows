@@ -119,6 +119,21 @@ The following item properties are populated by the template workflow from GitHub
 | `run_id` | `${{ github.run_id }}` | Current run ID, must be a positive integer, stored only as a property. |
 | `run_attempt` | `${{ github.run_attempt }}` | Attempt number of the current run, must be a positive integer, stored only as a property. |
 
+### Nightly Build Source Property Overrides
+
+The separate [Nightly Build workflow](../../.github/workflows/nightly-build.yml) reuses this upload script and exposes an optional `source_properties` string input, defaulting to `'{}'`. It accepts a JSON object containing only `branch`, `commit`, and `tag`:
+
+```yaml
+with:
+  source_properties: '{"branch":"release/main","commit":"custom-commit","tag":""}'
+```
+
+- An omitted key keeps the automatically resolved source property; omitting `source_properties` or passing `'{}'` keeps all three automatic values.
+- A present key overrides the property with its exact string value, including `""`. For example, `'{"commit":""}'` sends an explicitly empty `commit` property instead of falling back to the source SHA.
+- Values must be strings; `null`, numbers, arrays, malformed JSON, and keys other than `branch`, `commit`, and `tag` are rejected before any upload request.
+- These overrides affect only item Properties. The existing `branch` input still selects the source checkout; automatic version naming and wheel filenames still use the resolved source SHA. `log_url`, `run_id`, and `run_attempt` remain context-derived.
+- This input is available on `nightly-build.yml`, not on the standalone `upload-artifact-properties.yml` workflow documented above. Reference matching workflow and script revisions through `uses` and `template_ref`.
+
 ## Secrets
 
 | Template Secret | Required | Caller Secret in the Example | Description |
