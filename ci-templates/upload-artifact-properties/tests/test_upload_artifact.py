@@ -1225,14 +1225,16 @@ def test_nightly_keeps_only_requested_jobs_and_steps(nightly_workflow):
     assert job["steps"][rename_index + 1]["name"] == "Upload collected wheel artifacts"
     without_rename = job["steps"][:rename_index] + job["steps"][rename_index + 1:]
     assert without_rename[:cutoff] == original_job["steps"][:cutoff]
-    guard, checkout, setup, upload = without_rename[cutoff:]
+    guard, checkout, setup, upload, summary = without_rename[cutoff:]
     original_guard, original_checkout, original_setup, original_download, original_upload = (
         properties["jobs"]["upload-artifact"]["steps"]
     )
     assert [step["name"] for step in without_rename[cutoff:]] == [
         original_guard["name"], original_checkout["name"], original_setup["name"],
-        "Upload wheels and set Artifactory properties",
+        "Upload wheels and set Artifactory properties", "Write uploaded file URLs to job summary",
     ]
+    assert summary["shell"] == "bash"
+    assert summary["env"] == {"UPLOAD_URLS": "${{ steps.upload.outputs.upload_urls }}"}
     assert not artifact_name.endswith(".zip")
     assert guard == dict(original_guard, env={"ARTIFACT_NAME": artifact_name})
     assert checkout == original_checkout
@@ -1267,6 +1269,34 @@ def test_nightly_uses_package_version_without_release_version_validation(nightly
     generate = next(step for step in prepare["steps"] if step.get("id") == "matrix")
     assert generate["env"]["NIGHTLY_BUILD"] == "true"
     assert nightly_workflow["jobs"]["matrix-job"]["env"]["RELEASE_VERSION"] == "${{ matrix.release_version }}"
+
+
+@pytest.mark.parametrize("filenames", [["demo+nightly.whl"], ["a.whl", "b+nightly.whl"]])
+def test_nightly_summary_shows_actual_uploaded_urls(
+    filenames, nightly_workflow, make_file, workspace, request,
+):
+    run_shell = subprocess.run
+    for filename in filenames:
+        make_file(filename=filename)
+    code, transport = request.getfixturevalue("run_upload")(
+        inputs=dict(DEFAULT_INPUTS, upload_repository="release-team/wheels", version="1.2.3+nightly"),
+    )
+    assert code == 0
+    urls = (workspace / "outputs").read_text().splitlines()[2:-1]
+    assert urls == [_last_curl_flags(args)[0] for args in _curl_args(transport)[::2]]
+    assert all("/release-team/wheels/1.2.3%2Bnightly/" in url for url in urls)
+    summary = nightly_workflow["jobs"]["matrix-job"]["steps"][-1]
+    summary_path = workspace / "summary.md"
+    summary_path.write_text("Existing content\n", encoding="utf-8")
+    result = run_shell(
+        ["bash", "-c", summary["run"]],
+        env=dict(os.environ, UPLOAD_URLS="\n".join(urls), GITHUB_STEP_SUMMARY=str(summary_path)),
+        text=True, capture_output=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert summary_path.read_text(encoding="utf-8") == (
+        "Existing content\n### Uploaded Artifactory files\n\n" + "".join(f"- <{url}>\n" for url in urls)
+    )
 
 
 def test_nightly_embedded_scripts_have_valid_syntax(nightly_workflow):
@@ -1397,7 +1427,8 @@ def test_nightly_upload_rejects_non_wheel_artifacts(case, nightly_workflow, work
             make_file(filename=filename, directory="dist")
             if case == "multiple":
                 make_file(filename="other.whl", directory="dist")
-    mapping, _ = nightly_workflow["jobs"]["matrix-job"]["steps"][-1]["run"].rstrip().rsplit("\n", 1)
+    upload = next(step for step in nightly_workflow["jobs"]["matrix-job"]["steps"] if step.get("id") == "upload")
+    mapping, _ = upload["run"].rstrip().rsplit("\n", 1)
     environment = dict(os.environ, ARTIFACT_DIR=str(directory), ARTIFACT_PATTERN="*.whl", TEST_PYTHON=sys.executable)
     shim = 'python() { "$TEST_PYTHON" "$@"; }\n'
     result = subprocess.run(["bash", "-e"], input=shim + mapping, env=environment,
@@ -1428,7 +1459,7 @@ def test_nightly_matrix_properties_reach_uploader(
         "torch_version": torch_version, "sdk_version": sdk_version,
         "tag": "", "release_version": package_version, "whl_name": "",
     }
-    upload = nightly_workflow["jobs"]["matrix-job"]["steps"][-1]
+    upload = next(step for step in nightly_workflow["jobs"]["matrix-job"]["steps"] if step.get("id") == "upload")
     mapping, command = upload["run"].rstrip().rsplit("\n", 1)
     assert command == "python ci-template/ci-templates/upload-artifact-properties/scripts/upload_artifact.py"
     original = make_file(filename="demo_package-1.2.3-py3-none-any.whl", directory="dist",
@@ -1502,10 +1533,11 @@ def test_nightly_source_reference_contract(nightly_workflow):
     build_checkout = next(step for step in job["steps"] if step["name"] == "Check out the repository to build")
     assert build_checkout["with"]["ref"] == "${{ needs.prepare-matrix.outputs.source_sha }}"
     assert build_checkout["with"]["submodules"] == "recursive"
+    upload = next(step for step in job["steps"] if step.get("id") == "upload")
     for key in ("sha", "branch", "tag"):
         assert prepare["outputs"][f"source_{key}"] == "${{ steps.source.outputs." + key + " }}"
         assert job["env"][f"SOURCE_{key.upper()}"] == "${{ needs.prepare-matrix.outputs.source_" + key + " }}"
-        assert f'export GITHUB_{key.upper()}="$SOURCE_{key.upper()}"' in job["steps"][-1]["run"]
+        assert f'export GITHUB_{key.upper()}="$SOURCE_{key.upper()}"' in upload["run"]
     for current_job in nightly_workflow["jobs"].values():
         for step in current_job["steps"]:
             if step.get("with", {}).get("path") == "ci-template":
@@ -1679,7 +1711,7 @@ def test_nightly_selected_source_reaches_upload_version_and_properties(
     wheel = original.with_name(
         f"demo_package-1.2.3+custom.{source['sha'][:7]}.cuda13.0.0.ubuntu2204.sdk2.2.0-py3-none-any.whl"
     )
-    upload = nightly_workflow["jobs"]["matrix-job"]["steps"][-1]
+    upload = next(step for step in nightly_workflow["jobs"]["matrix-job"]["steps"] if step.get("id") == "upload")
     mapping, _ = upload["run"].rstrip().rsplit("\n", 1)
     capture = '''
 python - <<'PY'

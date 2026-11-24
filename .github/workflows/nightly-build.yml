@@ -542,3 +542,18 @@ jobs:
           export GITHUB_BRANCH="$SOURCE_BRANCH"
           export GITHUB_TAG="$SOURCE_TAG"
           python ci-template/ci-templates/upload-artifact-properties/scripts/upload_artifact.py
+
+      - name: Write uploaded file URLs to job summary
+        shell: bash
+        env:
+          UPLOAD_URLS: ${{ steps.upload.outputs.upload_urls }}
+        run: |
+          set -euo pipefail
+          {
+            printf '### Uploaded Artifactory files\n\n'
+            while IFS= read -r url; do
+              if [[ -n "$url" ]]; then
+                printf -- '- <%s>\n' "$url"
+              fi
+            done <<< "$UPLOAD_URLS"
+          } >> "$GITHUB_STEP_SUMMARY"
